@@ -1,0 +1,17 @@
+# 機密ファイル
+.env*
+*.pem
+*.key
+credentials/
+secrets/
+
+# 大容量ファイル
+*.csv
+*.xlsx
+*.pptx
+*.docx
+*.zip
+*.tar.gz
+
+# OS
+.DS_Store
