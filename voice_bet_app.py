@@ -370,13 +370,15 @@ def _fill_amount_on_betlist(page, amount: int, log_lines: list):
         log_lines.append(f"  ⚠️  金額入力欄が見つかりません。手動で {amount:,}円 を入力してください。")
 
 
-def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, bytes | None]:
+def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, str]:
     """
-    ヘッドレスPlaywrightで買い目入力 → bet_listのスクリーンショットを返す。
-    Returns: (log_str, screenshot_bytes)
+    ヘッドレスPlaywrightで買い目・金額を入力する。
+    Returns: (log_str, bet_list_url)
     """
     log_lines = []
-    screenshot = None
+    m = re.search(r"race_id=(\d{12})", base_race_url)
+    race_id = m.group(1) if m else ""
+    bet_list_url = f"https://race.sp.netkeiba.com/ipat/bet_list.html?race_id={race_id}"
 
     with sync_playwright() as p:
         context = _make_context(p)
@@ -399,78 +401,10 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, bytes |
             except Exception as e:
                 log_lines.append(f"  ❌ エラー: {e}")
 
-        try:
-            m = re.search(r"race_id=(\d{12})", base_race_url)
-            race_id = m.group(1) if m else ""
-            bet_list_url = f"https://race.sp.netkeiba.com/ipat/bet_list.html?race_id={race_id}"
-            page.goto(bet_list_url, timeout=30000)
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            page.wait_for_timeout(1000)
-            screenshot = page.screenshot()
-            log_lines.append("✅ 買い目入力完了")
-        except Exception as e:
-            log_lines.append(f"❌ bet_list遷移エラー: {e}")
-            try:
-                screenshot = page.screenshot()
-            except Exception:
-                pass
-
+        log_lines.append("\n✅ 買い目入力完了")
         context.close()
 
-    return "\n".join(log_lines), screenshot
-
-
-def confirm_ipat_bet(base_race_url: str) -> tuple[str, bytes | None]:
-    """
-    bet_listページへ移動し、投票確定ボタンをクリックしてスクリーンショットを返す。
-    Returns: (log_str, screenshot_bytes)
-    """
-    log_lines = []
-    screenshot = None
-
-    with sync_playwright() as p:
-        context = _make_context(p)
-        page = context.new_page()
-
-        try:
-            m = re.search(r"race_id=(\d{12})", base_race_url)
-            race_id = m.group(1) if m else ""
-            bet_list_url = f"https://race.sp.netkeiba.com/ipat/bet_list.html?race_id={race_id}"
-            page.goto(bet_list_url, timeout=30000)
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            page.wait_for_timeout(1000)
-
-            result = page.evaluate("""
-                (function() {
-                    var keywords = ['投票', '確定', '購入', '発券'];
-                    var els = document.querySelectorAll('button, input[type="submit"], a');
-                    for (var el of els) {
-                        var t = (el.textContent || el.value || '').trim();
-                        for (var kw of keywords) {
-                            if (t.indexOf(kw) >= 0) {
-                                el.click();
-                                return 'clicked: ' + t.slice(0, 20);
-                            }
-                        }
-                    }
-                    return 'ボタンが見つかりませんでした';
-                })()
-            """)
-            log_lines.append(f"  → {result}")
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            page.wait_for_timeout(1000)
-            screenshot = page.screenshot()
-            log_lines.append("✅ 投票確定完了")
-        except Exception as e:
-            log_lines.append(f"❌ エラー: {e}")
-            try:
-                screenshot = page.screenshot()
-            except Exception:
-                pass
-
-        context.close()
-
-    return "\n".join(log_lines), screenshot
+    return "\n".join(log_lines), bet_list_url
 
 
 # ════════════════════════════════════════
@@ -482,7 +416,6 @@ st.caption("「東京7レース」でレース選択 → 「3連複 1-3-5 各100
 # セッション初期化
 for key, default in [
     ("bets", []), ("recognized", ""), ("race_url", ""), ("race_label", ""),
-    ("bet_screenshot", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -503,7 +436,6 @@ with st.sidebar:
         if st.button("レースを変更"):
             st.session_state.race_url = ""
             st.session_state.race_label = ""
-            st.session_state.bet_screenshot = None
             st.rerun()
 
     st.divider()
@@ -518,7 +450,6 @@ with st.sidebar:
         st.divider()
         if st.button("🗑️ 全削除", use_container_width=True):
             st.session_state.bets = []
-            st.session_state.bet_screenshot = None
             st.rerun()
     else:
         st.caption("まだ買い目がありません")
@@ -620,34 +551,17 @@ if st.session_state.bets:
 
     if not st.session_state.race_url:
         st.warning("先にレースを音声で選択してください（「東京7レース」など）")
-    elif st.session_state.bet_screenshot:
-        # スクリーンショット確認フロー
-        st.image(st.session_state.bet_screenshot, caption="bet_list画面 — 内容を確認してください")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("✅ 投票確定", type="primary", use_container_width=True):
-                with st.spinner("投票確定中..."):
-                    log, shot = confirm_ipat_bet(st.session_state.race_url)
-                st.session_state.bet_screenshot = None
-                if shot:
-                    st.image(shot, caption="投票結果")
-                with st.expander("操作ログ"):
-                    st.text(log)
-        with col2:
-            if st.button("✕ キャンセル", use_container_width=True):
-                st.session_state.bet_screenshot = None
-                st.rerun()
     else:
         st.info(f"**{len(st.session_state.bets)}件** → {st.session_state.race_label}")
         if st.button("🏇 netkeiba に自動入力", type="primary", use_container_width=True):
             with st.spinner("自動入力中（しばらくお待ちください）..."):
-                log, shot = input_bets_to_netkeiba(
+                log, bet_list_url = input_bets_to_netkeiba(
                     st.session_state.race_url, st.session_state.bets
                 )
-            st.session_state.bet_screenshot = shot
+            st.success("買い目入力が完了しました")
+            st.link_button("📋 bet_list を開く", bet_list_url, use_container_width=True)
             with st.expander("操作ログ"):
                 st.text(log)
-            st.rerun()
 
     with st.expander("買い目データ（JSON）"):
         st.json(st.session_state.bets)
