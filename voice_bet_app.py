@@ -377,15 +377,15 @@ def _check_horses(page, bet: dict, log_lines: list):
 def _click_add_button(page, bet: dict, log_lines: list):
     cfg = BET_TYPES[bet["type_name"]]
     if cfg["frm"] in ("tan_b1", "tan_b2"):
-        result = page.evaluate("""
+        js = """
             (function() {
                 var btn = document.querySelector('button.AddBtn');
                 if (btn) { btn.click(); return 'clicked AddBtn'; }
                 return 'AddBtn not found';
             })()
-        """)
+        """
     else:
-        result = page.evaluate("""
+        js = """
             (function() {
                 if (typeof add_odds === 'function') {
                     add_odds('bet');
@@ -400,11 +400,19 @@ def _click_add_button(page, bet: dict, log_lines: list):
                 }
                 return 'no button found';
             })()
-        """)
-    log_lines.append(f"  → {result}")
+        """
+    try:
+        with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+            result = page.evaluate(js)
+        log_lines.append(f"  → {result}")
+        log_lines.append(f"  遷移先URL: {page.url}")
+    except Exception as e:
+        log_lines.append(f"  → ナビゲーション待機失敗: {e}")
+        log_lines.append(f"  現在URL: {page.url}")
 
 def _fill_amount_on_betlist(page, amount: int, log_lines: list):
     page.wait_for_timeout(800)
+    log_lines.append(f"  金額入力ページ: {page.url}")
     filled_count = page.evaluate(f"""
         (function() {{
             var selectors = [
@@ -463,7 +471,6 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | No
                 _check_horses(page, bet, log_lines)
                 page.wait_for_timeout(150)
                 _click_add_button(page, bet, log_lines)
-                page.wait_for_load_state("domcontentloaded", timeout=10000)
                 _fill_amount_on_betlist(page, bet["amount"], log_lines)
             except Exception as e:
                 log_lines.append(f"  ❌ エラー: {e}")
