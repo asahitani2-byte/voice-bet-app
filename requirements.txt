@@ -1,0 +1,7 @@
+streamlit>=1.32.0
+requests
+beautifulsoup4
+SpeechRecognition
+streamlit-mic-recorder
+imageio-ffmpeg
+playwright>=1.44.0
