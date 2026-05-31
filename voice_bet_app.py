@@ -127,6 +127,38 @@ def get_ipat_url(venue: str, race_num: int) -> str | None:
     return None
 
 # ─── 音声テキスト振り分け ────────────────────────────────────
+# ─── 馬券種別の読み仮名・誤変換マッピング ───────────────────
+BET_ALIASES = {
+    # 単勝
+    "たんしょう": "単勝", "短小": "単勝", "短勝": "単勝",
+    "単小": "単勝", "誕生": "単勝", "タンショウ": "単勝",
+    # 複勝
+    "ふくしょう": "複勝", "福勝": "複勝", "福小": "複勝",
+    "複小": "複勝", "フクショウ": "複勝",
+    # 馬連
+    "うまれん": "馬連", "馬れん": "馬連", "ウマレン": "馬連",
+    # 馬単
+    "うまたん": "馬単", "馬たん": "馬単", "ウマタン": "馬単",
+    # ワイド
+    "わいど": "ワイド", "ワイト": "ワイド",
+    # 枠連
+    "わくれん": "枠連", "枠れん": "枠連", "ワクレン": "枠連",
+    # 3連複
+    "さんれんぷく": "3連複", "三連服": "3連複", "三連福": "3連複",
+    "3連服": "3連複", "3連福": "3連複", "サンレンプク": "3連複",
+    "さんれんふく": "3連複",
+    # 3連単
+    "さんれんたん": "3連単", "サンレンタン": "3連単",
+    "さんれん単": "3連単", "3連たん": "3連単",
+}
+
+def normalize_bet_text(text: str) -> str:
+    """音声認識の読み仮名・誤変換を正式な馬券種別名に置換する"""
+    for alias, official in BET_ALIASES.items():
+        if alias in text:
+            text = text.replace(alias, official)
+    return text
+
 RACE_PATTERN = re.compile(
     r"(" + "|".join(VENUE_NAMES) + r").*?(\d+)\s*(?:レース|Ｒ|R)",
     re.IGNORECASE,
@@ -152,7 +184,7 @@ def parse_race_spec(text: str) -> dict:
 
 # ─── 買い目パース ────────────────────────────────────────────
 def parse_bet(text: str) -> dict:
-    text = text.strip()
+    text = normalize_bet_text(text.strip())
     result = {"raw": text, "type_name": None, "horses": [], "amount": 100,
               "box": False, "formation": False, "error": None}
 
