@@ -285,12 +285,24 @@ def _make_context(p, cookie_str: str | None = None):
 def _ensure_logged_in(page, log_lines: list):
     """未ログインの場合、環境変数の認証情報でnetkeibaにログインする"""
     if not NETKEIBA_USER or not NETKEIBA_PASS:
+        log_lines.append("⚠️ 環境変数 NETKEIBA_USER / NETKEIBA_PASS が未設定")
         return
+    log_lines.append(f"IPAT確認中...")
     page.goto("https://race.sp.netkeiba.com/ipat/", timeout=20000)
     page.wait_for_load_state("domcontentloaded", timeout=10000)
-    if "login" not in page.url and not page.query_selector("input[name='login_id']"):
-        log_lines.append("ログイン済み")
+    log_lines.append(f"  現在URL: {page.url}")
+
+    # ページ内のinput要素のname一覧を診断ログに出す
+    input_names = page.evaluate("""
+        () => Array.from(document.querySelectorAll('input')).map(e => e.name || e.id || e.type).filter(Boolean)
+    """)
+    log_lines.append(f"  input要素: {input_names}")
+
+    need_login = "login" in page.url or bool(page.query_selector("input[name='login_id'], input[name='email'], input[type='email']"))
+    if not need_login:
+        log_lines.append("  → ログイン済み")
         return
+
     log_lines.append("自動ログイン中...")
     try:
         page.goto(
@@ -299,11 +311,26 @@ def _ensure_logged_in(page, log_lines: list):
             timeout=20000,
         )
         page.wait_for_load_state("domcontentloaded", timeout=10000)
-        page.fill("input[name='login_id']", NETKEIBA_USER)
-        page.fill("input[name='pswd']", NETKEIBA_PASS)
+        log_lines.append(f"  ログインページURL: {page.url}")
+        input_names2 = page.evaluate("""
+            () => Array.from(document.querySelectorAll('input')).map(e => e.name || e.id || e.type).filter(Boolean)
+        """)
+        log_lines.append(f"  ログインページinput要素: {input_names2}")
+
+        # 複数パターンに対応
+        for sel in ["input[name='login_id']", "input[name='email']", "input[type='email']"]:
+            if page.query_selector(sel):
+                page.fill(sel, NETKEIBA_USER)
+                log_lines.append(f"  ID入力: {sel}")
+                break
+        for sel in ["input[name='pswd']", "input[name='password']", "input[type='password']"]:
+            if page.query_selector(sel):
+                page.fill(sel, NETKEIBA_PASS)
+                log_lines.append(f"  PW入力: {sel}")
+                break
         page.click("input[type='submit'], button[type='submit']")
         page.wait_for_load_state("domcontentloaded", timeout=15000)
-        log_lines.append("ログイン完了")
+        log_lines.append(f"  ログイン後URL: {page.url}")
     except Exception as e:
         log_lines.append(f"ログインエラー: {e}")
 
