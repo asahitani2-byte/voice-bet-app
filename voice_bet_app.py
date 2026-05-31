@@ -256,8 +256,10 @@ def transcribe_audio(audio_bytes: bytes) -> str:
     except sr.RequestError as e:
         return f"ERROR:{e}"
 
-# ─── netkeiba Playwright 自動入力（ヘッドレス・スクリーンショット返却）────
+# ─── netkeiba Playwright 自動入力 ────────────────────────────
 IPAT_PROFILE = os.path.join(os.path.expanduser("~"), ".netkeiba_ipat_profile")
+NETKEIBA_USER = os.environ.get("NETKEIBA_USER", "")
+NETKEIBA_PASS = os.environ.get("NETKEIBA_PASS", "")
 
 def _make_context(p, cookie_str: str | None = None):
     """ブラウザコンテキストを作成。cookie_strが指定された場合はそれを注入してユーザーセッションを引き継ぐ。"""
@@ -279,6 +281,31 @@ def _make_context(p, cookie_str: str | None = None):
         if cookies:
             context.add_cookies(cookies)
     return context
+
+def _ensure_logged_in(page, log_lines: list):
+    """未ログインの場合、環境変数の認証情報でnetkeibaにログインする"""
+    if not NETKEIBA_USER or not NETKEIBA_PASS:
+        return
+    page.goto("https://race.sp.netkeiba.com/ipat/", timeout=20000)
+    page.wait_for_load_state("domcontentloaded", timeout=10000)
+    if "login" not in page.url and not page.query_selector("input[name='login_id']"):
+        log_lines.append("ログイン済み")
+        return
+    log_lines.append("自動ログイン中...")
+    try:
+        page.goto(
+            "https://regist.netkeiba.com/account/?pid=login"
+            "&redirect=https%3A%2F%2Frace.sp.netkeiba.com%2Fipat%2F",
+            timeout=20000,
+        )
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        page.fill("input[name='login_id']", NETKEIBA_USER)
+        page.fill("input[name='pswd']", NETKEIBA_PASS)
+        page.click("input[type='submit'], button[type='submit']")
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+        log_lines.append("ログイン完了")
+    except Exception as e:
+        log_lines.append(f"ログインエラー: {e}")
 
 def _odds_view_url(base_race_url: str, bet: dict) -> str:
     m = re.search(r"race_id=(\d{12})", base_race_url)
@@ -395,6 +422,7 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | No
     with sync_playwright() as p:
         context = _make_context(p, cookie_str=ipat_cookie)
         page = context.new_page()
+        _ensure_logged_in(page, log_lines)
 
         for i, bet in enumerate(bets):
             log_lines.append(f"\n{'='*40}")
