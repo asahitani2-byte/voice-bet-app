@@ -259,15 +259,26 @@ def transcribe_audio(audio_bytes: bytes) -> str:
 # ─── netkeiba Playwright 自動入力（ヘッドレス・スクリーンショット返却）────
 IPAT_PROFILE = os.path.join(os.path.expanduser("~"), ".netkeiba_ipat_profile")
 
-def _make_context(p):
-    """IPAT専用プロファイルでPersistentContextを作成"""
-    return p.chromium.launch_persistent_context(
+def _make_context(p, cookie_str: str | None = None):
+    """ブラウザコンテキストを作成。cookie_strが指定された場合はそれを注入してユーザーセッションを引き継ぐ。"""
+    context = p.chromium.launch_persistent_context(
         user_data_dir=IPAT_PROFILE,
         headless=True,
         args=["--no-sandbox", "--disable-dev-shm-usage"],
         viewport={"width": 390, "height": 844},
-        slow_mo=200,
     )
+    if cookie_str:
+        cookies = []
+        for part in cookie_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, _, value = part.partition("=")
+                for domain in ["race.sp.netkeiba.com", ".netkeiba.com"]:
+                    cookies.append({"name": name.strip(), "value": value.strip(),
+                                    "domain": domain, "path": "/"})
+        if cookies:
+            context.add_cookies(cookies)
+    return context
 
 def _odds_view_url(base_race_url: str, bet: dict) -> str:
     m = re.search(r"race_id=(\d{12})", base_race_url)
@@ -295,19 +306,19 @@ def _check_horses(page, bet: dict, log_lines: list):
         for h in horses:
             ok = _js_click(page, f"input[value*='_b1_c0_{h}']")
             log_lines.append(f"  {'✅' if ok else '❌'} 単勝 馬番{h}")
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(80)
     elif frm == "tan_b2":
         for h in horses:
             ok = _js_click(page, f"input[value*='_b2_c0_{h}']")
             log_lines.append(f"  {'✅' if ok else '❌'} 複勝 馬番{h}")
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(80)
     elif frm in ("multi2", "multi3"):
         cols = ["frm1", "frm2"] if frm == "multi2" else ["frm1", "frm2", "frm3"]
         for col in cols:
             for h in horses:
                 ok = _js_click(page, f"input[name='{col}[]'][value='{h}']")
                 log_lines.append(f"  {'✅' if ok else '❌'} {col} 馬番{h}")
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(80)
 
 def _click_add_button(page, bet: dict, log_lines: list):
     cfg = BET_TYPES[bet["type_name"]]
@@ -339,7 +350,7 @@ def _click_add_button(page, bet: dict, log_lines: list):
     log_lines.append(f"  → {result}")
 
 def _fill_amount_on_betlist(page, amount: int, log_lines: list):
-    page.wait_for_timeout(2500)
+    page.wait_for_timeout(800)
     filled_count = page.evaluate(f"""
         (function() {{
             var selectors = [
@@ -370,19 +381,19 @@ def _fill_amount_on_betlist(page, amount: int, log_lines: list):
         log_lines.append(f"  ⚠️  金額入力欄が見つかりません。手動で {amount:,}円 を入力してください。")
 
 
-def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, bytes | None]:
+def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | None = None) -> tuple[str, str]:
     """
-    ヘッドレスPlaywrightで買い目・金額を入力し、bet_listのスクリーンショットを返す。
-    Returns: (log_str, screenshot_bytes)
+    ヘッドレスPlaywrightで買い目・金額を入力する。
+    ipat_cookieが指定された場合はユーザーのセッションで操作し、iPhone側でbet_listが確認できる。
+    Returns: (log_str, bet_list_url)
     """
     log_lines = []
     m = re.search(r"race_id=(\d{12})", base_race_url)
     race_id = m.group(1) if m else ""
     bet_list_url = f"https://race.sp.netkeiba.com/ipat/bet_list.html?race_id={race_id}"
-    screenshot = None
 
     with sync_playwright() as p:
-        context = _make_context(p)
+        context = _make_context(p, cookie_str=ipat_cookie)
         page = context.new_page()
 
         for i, bet in enumerate(bets):
@@ -393,27 +404,19 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, bytes |
                 log_lines.append(f"→ {url}")
                 page.goto(url, timeout=30000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
-                page.wait_for_timeout(1500)
-                _check_horses(page, bet, log_lines)
                 page.wait_for_timeout(500)
+                _check_horses(page, bet, log_lines)
+                page.wait_for_timeout(150)
                 _click_add_button(page, bet, log_lines)
                 page.wait_for_load_state("domcontentloaded", timeout=10000)
                 _fill_amount_on_betlist(page, bet["amount"], log_lines)
             except Exception as e:
                 log_lines.append(f"  ❌ エラー: {e}")
 
-        try:
-            page.goto(bet_list_url, timeout=30000)
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            page.wait_for_timeout(1000)
-            screenshot = page.screenshot(full_page=True)
-            log_lines.append("\n✅ 買い目入力完了")
-        except Exception as e:
-            log_lines.append(f"\n⚠️ bet_list取得エラー: {e}")
-
+        log_lines.append("\n✅ 買い目入力完了")
         context.close()
 
-    return "\n".join(log_lines), screenshot
+    return "\n".join(log_lines), bet_list_url
 
 
 # ════════════════════════════════════════
@@ -425,6 +428,7 @@ st.caption("「東京7レース」でレース選択 → 「3連複 1-3-5 各100
 # セッション初期化
 for key, default in [
     ("bets", []), ("recognized", ""), ("race_url", ""), ("race_label", ""),
+    ("ipat_cookie", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -446,6 +450,25 @@ with st.sidebar:
             st.session_state.race_url = ""
             st.session_state.race_label = ""
             st.rerun()
+
+    st.divider()
+    with st.expander("🔑 IPATセッション連携", expanded=not st.session_state.ipat_cookie):
+        st.caption("iPhoneのSafariでnetkeibaを開き、アドレスバーに\n`javascript:prompt('',document.cookie)`\nと入力して表示されたCookieを貼り付けてください")
+        cookie_input = st.text_area("Cookie文字列", value=st.session_state.ipat_cookie,
+                                     placeholder="netkeibaipat=xxx; _gcl_au=...", height=80, key="cookie_input")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("連携する", use_container_width=True):
+                st.session_state.ipat_cookie = cookie_input.strip()
+                st.rerun()
+        with c2:
+            if st.button("解除", use_container_width=True):
+                st.session_state.ipat_cookie = ""
+                st.rerun()
+        if st.session_state.ipat_cookie:
+            st.success("✅ セッション連携中")
+        else:
+            st.warning("未連携（サーバー側プロファイルを使用）")
 
     st.divider()
     st.markdown("### 買い目一覧")
@@ -562,15 +585,21 @@ if st.session_state.bets:
         st.warning("先にレースを音声で選択してください（「東京7レース」など）")
     else:
         st.info(f"**{len(st.session_state.bets)}件** → {st.session_state.race_label}")
+        if st.session_state.ipat_cookie:
+            st.success("🔑 セッション連携中 — 完了後にiPhoneでbet_listを開けます")
+        else:
+            st.caption("※ IPATセッション未連携のため、iPhone側で買い目を確認できません")
+
         if st.button("🏇 netkeiba に自動入力", type="primary", use_container_width=True):
-            with st.spinner("自動入力中（しばらくお待ちください）..."):
-                log, screenshot = input_bets_to_netkeiba(
-                    st.session_state.race_url, st.session_state.bets
+            with st.spinner("自動入力中..."):
+                log, bet_list_url = input_bets_to_netkeiba(
+                    st.session_state.race_url,
+                    st.session_state.bets,
+                    ipat_cookie=st.session_state.ipat_cookie or None,
                 )
-            if screenshot:
-                st.image(screenshot, caption="bet_list — 入力済み買い目")
-            else:
-                st.warning("スクリーンショットを取得できませんでした")
+            st.success("✅ 買い目入力完了")
+            st.link_button("📋 bet_list を開く（同じセッションで確認）", bet_list_url,
+                           use_container_width=True)
             with st.expander("操作ログ"):
                 st.text(log)
 
