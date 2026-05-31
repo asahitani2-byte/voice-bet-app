@@ -370,15 +370,16 @@ def _fill_amount_on_betlist(page, amount: int, log_lines: list):
         log_lines.append(f"  ⚠️  金額入力欄が見つかりません。手動で {amount:,}円 を入力してください。")
 
 
-def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, str]:
+def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, bytes | None]:
     """
-    ヘッドレスPlaywrightで買い目・金額を入力する。
-    Returns: (log_str, bet_list_url)
+    ヘッドレスPlaywrightで買い目・金額を入力し、bet_listのスクリーンショットを返す。
+    Returns: (log_str, screenshot_bytes)
     """
     log_lines = []
     m = re.search(r"race_id=(\d{12})", base_race_url)
     race_id = m.group(1) if m else ""
     bet_list_url = f"https://race.sp.netkeiba.com/ipat/bet_list.html?race_id={race_id}"
+    screenshot = None
 
     with sync_playwright() as p:
         context = _make_context(p)
@@ -401,10 +402,18 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list) -> tuple[str, str]:
             except Exception as e:
                 log_lines.append(f"  ❌ エラー: {e}")
 
-        log_lines.append("\n✅ 買い目入力完了")
+        try:
+            page.goto(bet_list_url, timeout=30000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            page.wait_for_timeout(1000)
+            screenshot = page.screenshot(full_page=True)
+            log_lines.append("\n✅ 買い目入力完了")
+        except Exception as e:
+            log_lines.append(f"\n⚠️ bet_list取得エラー: {e}")
+
         context.close()
 
-    return "\n".join(log_lines), bet_list_url
+    return "\n".join(log_lines), screenshot
 
 
 # ════════════════════════════════════════
@@ -555,11 +564,13 @@ if st.session_state.bets:
         st.info(f"**{len(st.session_state.bets)}件** → {st.session_state.race_label}")
         if st.button("🏇 netkeiba に自動入力", type="primary", use_container_width=True):
             with st.spinner("自動入力中（しばらくお待ちください）..."):
-                log, bet_list_url = input_bets_to_netkeiba(
+                log, screenshot = input_bets_to_netkeiba(
                     st.session_state.race_url, st.session_state.bets
                 )
-            st.success("買い目入力が完了しました")
-            st.link_button("📋 bet_list を開く", bet_list_url, use_container_width=True)
+            if screenshot:
+                st.image(screenshot, caption="bet_list — 入力済み買い目")
+            else:
+                st.warning("スクリーンショットを取得できませんでした")
             with st.expander("操作ログ"):
                 st.text(log)
 
