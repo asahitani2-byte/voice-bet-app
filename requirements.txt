@@ -4,4 +4,4 @@ beautifulsoup4
 SpeechRecognition
 streamlit-mic-recorder
 imageio-ffmpeg
-playwright>=1.44.0
+playwright==1.60.0
