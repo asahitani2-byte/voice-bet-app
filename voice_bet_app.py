@@ -162,20 +162,26 @@ def parse_race_spec(text: str) -> dict:
 def _parse_frm_groups(text: str, n_cols: int) -> list[list[int]] | None:
     """
     「1頭目1番 2頭目2番3番4番」→ [[1],[2,3,4]] のように列ごとの馬番リストを返す。
-    「1頭目」「2頭目」「3頭目」マーカーで分割。見つからない場合はNone。
+    「頭目」「投目」どちらも受け付け、番号は漢数字・全角・半角すべて対応。
+    「番」なしの数字も認識。見つからない場合はNone。
     """
-    markers = [(m.start(), m.end(), int(m.group(1)))
-               for m in re.finditer(r"([1-3１-３一二三])[頭]目", text)]
+    _COL = {"一": 1, "二": 2, "三": 3, "１": 1, "２": 2, "３": 3,
+            "1": 1, "2": 2, "3": 3}
+
+    markers = []
+    for m in re.finditer(r"([1-3１-３一二三])[頭投]目", text):
+        col_num = _COL.get(m.group(1), 0)
+        if col_num:
+            markers.append((m.start(), m.end(), col_num))
+
     if not markers:
         return None
 
-    kanji_to_int = {"一": 1, "二": 2, "三": 3, "１": 1, "２": 2, "３": 3}
     groups: list[list[int]] = [[] for _ in range(n_cols)]
 
-    for i, (start, end, raw_col) in enumerate(markers):
-        col_num = kanji_to_int.get(str(raw_col), raw_col)
+    for i, (start, end, col_num) in enumerate(markers):
         seg_end = markers[i + 1][0] if i + 1 < len(markers) else len(text)
-        # マーカー終端以降から馬番を抽出（"X頭目" のX自体は除外）
+        # マーカー終端以降から馬番を抽出（「番」なし数字も対象）
         segment = text[end:seg_end]
         nums = [int(n) for n in re.findall(r"\d+", segment) if 1 <= int(n) <= 18]
         if 1 <= col_num <= n_cols:
