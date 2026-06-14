@@ -159,10 +159,35 @@ def parse_race_spec(text: str) -> dict:
     return {"error": "会場名とレース番号が認識できませんでした"}
 
 # ─── 買い目パース ────────────────────────────────────────────
+def _parse_frm_groups(text: str, n_cols: int) -> list[list[int]] | None:
+    """
+    「1頭目1番 2頭目2番3番4番」→ [[1],[2,3,4]] のように列ごとの馬番リストを返す。
+    「1頭目」「2頭目」「3頭目」マーカーで分割。見つからない場合はNone。
+    """
+    markers = [(m.start(), m.end(), int(m.group(1)))
+               for m in re.finditer(r"([1-3１-３一二三])[頭]目", text)]
+    if not markers:
+        return None
+
+    kanji_to_int = {"一": 1, "二": 2, "三": 3, "１": 1, "２": 2, "３": 3}
+    groups: list[list[int]] = [[] for _ in range(n_cols)]
+
+    for i, (start, end, raw_col) in enumerate(markers):
+        col_num = kanji_to_int.get(str(raw_col), raw_col)
+        seg_end = markers[i + 1][0] if i + 1 < len(markers) else len(text)
+        # マーカー終端以降から馬番を抽出（"X頭目" のX自体は除外）
+        segment = text[end:seg_end]
+        nums = [int(n) for n in re.findall(r"\d+", segment) if 1 <= int(n) <= 18]
+        if 1 <= col_num <= n_cols:
+            groups[col_num - 1] = nums
+
+    return groups if any(groups) else None
+
+
 def parse_bet(text: str) -> dict:
     text = normalize_bet_text(text.strip())
     result = {"raw": text, "type_name": None, "horses": [], "amount": 100,
-              "box": False, "formation": False, "error": None}
+              "box": False, "formation": False, "frm_groups": None, "error": None}
 
     for name in BET_TYPES:
         if name in text:
@@ -174,11 +199,24 @@ def parse_bet(text: str) -> dict:
 
     if re.search(r"ボックス|BOX|box", text, re.I):
         result["box"] = True
-    if re.search(r"ながし|流し|軸", text):
+    if re.search(r"フォーメーション|フォーメ|formation", text, re.I):
+        result["formation"] = True
+    elif re.search(r"ながし|流し|軸", text):
         result["formation"] = True
 
     nums = re.findall(r"\d+", text)
     result["horses"] = [int(n) for n in nums if 1 <= int(n) <= 18]
+
+    # フォーメーション：列ごとの馬番グループを解析
+    if result["formation"] and not result["box"]:
+        cfg = BET_TYPES.get(result["type_name"], {})
+        frm = cfg.get("frm", "")
+        if frm in ("multi2", "multi3"):
+            n_cols = 2 if frm == "multi2" else 3
+            groups = _parse_frm_groups(text, n_cols)
+            if groups:
+                result["frm_groups"] = groups
+                result["horses"] = [h for g in groups for h in g]
 
     m = re.search(r"(\d+)\s*(千円|百円|円)", text)
     if m:
@@ -205,6 +243,11 @@ def parse_bet(text: str) -> dict:
     return result
 
 def bet_label(bet: dict) -> str:
+    if bet.get("frm_groups"):
+        groups_str = " → ".join(
+            ",".join(str(h) for h in g) for g in bet["frm_groups"] if g
+        )
+        return f"{bet['type_name']}(フォーメ)  {groups_str}  {bet['amount']:,}円"
     horses = "-".join(str(h) for h in bet["horses"])
     suffix = "（BOX）" if bet["box"] else "（ながし）" if bet["formation"] else ""
     return f"{bet['type_name']}{suffix}  {horses}  {bet['amount']:,}円"
@@ -378,6 +421,8 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | No
                 # 馬番チェック
                 horses = bet["horses"]
                 frm = cfg["frm"]
+                frm_groups = bet.get("frm_groups")
+
                 if frm in ("tan_b1", "tan_b2"):
                     b_code = "1" if frm == "tan_b1" else "2"
                     for h in horses:
@@ -388,14 +433,26 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | No
                         log_lines.append(f"  {'✅' if ok else '❌'} 馬番{h}")
                 elif frm in ("multi2", "multi3"):
                     n_cols = 2 if frm == "multi2" else 3
-                    for col_idx in range(min(n_cols, len(horses))):
-                        h = horses[col_idx]
-                        col = f"frm{col_idx + 1}"
-                        ok = page.evaluate(
-                            f"() => {{ var e=document.querySelector(\"input[name='{col}[]'][value='{h}']\");"
-                            f" if(e){{e.click();return true;}} return false; }}"
-                        )
-                        log_lines.append(f"  {'✅' if ok else '❌'} {col} 馬番{h}")
+                    if frm_groups:
+                        # フォーメーション：列ごとに複数馬番
+                        for col_idx, group in enumerate(frm_groups[:n_cols]):
+                            col = f"frm{col_idx + 1}"
+                            for h in group:
+                                ok = page.evaluate(
+                                    f"() => {{ var e=document.querySelector(\"input[name='{col}[]'][value='{h}']\");"
+                                    f" if(e){{e.click();return true;}} return false; }}"
+                                )
+                                log_lines.append(f"  {'✅' if ok else '❌'} {col} 馬番{h}")
+                    else:
+                        # 通常：1列1頭
+                        for col_idx in range(min(n_cols, len(horses))):
+                            h = horses[col_idx]
+                            col = f"frm{col_idx + 1}"
+                            ok = page.evaluate(
+                                f"() => {{ var e=document.querySelector(\"input[name='{col}[]'][value='{h}']\");"
+                                f" if(e){{e.click();return true;}} return false; }}"
+                            )
+                            log_lines.append(f"  {'✅' if ok else '❌'} {col} 馬番{h}")
 
                 page.wait_for_timeout(300)
 
@@ -605,8 +662,18 @@ if recognized:
             st.error(bet["error"])
         else:
             c1, c2, c3 = st.columns(3)
-            c1.metric("馬券種別", bet["type_name"] + ("(BOX)" if bet["box"] else ""))
-            c2.metric("馬番", "-".join(str(h) for h in bet["horses"]))
+            type_label = bet["type_name"] + (
+                "(フォーメ)" if bet.get("frm_groups") else
+                "(BOX)" if bet["box"] else ""
+            )
+            if bet.get("frm_groups"):
+                horses_label = " → ".join(
+                    ",".join(str(h) for h in g) for g in bet["frm_groups"] if g
+                )
+            else:
+                horses_label = "-".join(str(h) for h in bet["horses"])
+            c1.metric("馬券種別", type_label)
+            c2.metric("馬番", horses_label)
             c3.metric("金額", f"{bet['amount']:,}円")
             col1, col2 = st.columns(2)
             with col1:
