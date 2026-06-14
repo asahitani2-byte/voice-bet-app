@@ -485,13 +485,16 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | No
             log_lines.append(f"\n金額入力ページ: {page.url}")
 
             # 金額フィールドを探して入力（100円単位）
+            # bet_listは追加の逆順（新しいものが上）で表示されるため逆インデックスで対応
+            n_bets = len(bets_copy)
             for i, bet in enumerate(bets_copy):
                 amount_100 = bet["amount"] // 100
+                el_idx = n_bets - 1 - i
                 filled = page.evaluate(f"""() => {{
                     var els = Array.from(document.querySelectorAll(
                         'input[type="number"], input[class*="Kin"], input[class*="kin"], input[name*="money"], input[name*="kin"]'
                     )).filter(e => e.type !== 'hidden');
-                    var el = els[{i}];
+                    var el = els[{el_idx}];
                     if (el) {{
                         el.value = '{amount_100}';
                         el.dispatchEvent(new Event('input', {{bubbles: true}}));
