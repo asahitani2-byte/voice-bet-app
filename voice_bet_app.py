@@ -1,6 +1,10 @@
 import os
 import re
 import io
+import time
+import threading
+import datetime
+import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 from datetime import date, timedelta
@@ -33,40 +37,34 @@ BET_TYPES = {
     "三連単":{"horses": 3, "type_code": "b8", "housiki": "c1", "frm": "multi3"},
 }
 
-# ─── 今日のレース一覧をnetkeibaから取得 ──────────────────────
-def _get_today_nichi() -> str | None:
-    today = date.today()
-    today_str = today.strftime("%Y%m%d")
-    try:
-        r = requests.get(
-            "https://race.sp.netkeiba.com/?rf=navi",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        soup = BeautifulSoup(r.text, "html.parser")
-    except Exception:
-        return None
+# ─── レース取得対象日の決定 ──────────────────────────────────
+def _target_date() -> date:
+    """
+    現在時刻に応じて取得するレース日を返す:
+      金曜17:00 〜 土曜17:00 → 当該土曜
+      土曜17:01 〜 日曜17:00 → 当該日曜
+      それ以外               → 直近過去の日曜（前の開催）
+    """
+    now = datetime.datetime.now()
+    wd = now.weekday()          # Mon=0, Fri=4, Sat=5, Sun=6
+    t  = now.hour * 60 + now.minute   # 分換算
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if f"day={today_str}" in href or f"day%3D{today_str}" in href:
-            parent = a.find_parent()
-            ids = re.findall(r"race_id=(\d{12})", str(parent))
-            if ids:
-                return ids[0][8:10]
+    CUTOFF = 17 * 60  # 17:00 = 1020分
 
-    weekday = today.isoweekday()
-    nichi_candidates: dict[str, int] = {}
-    for rid in re.findall(r"race_id=(\d{12})", r.text):
-        if rid[:4] == today.strftime("%Y"):
-            nichi_candidates[rid[8:10]] = nichi_candidates.get(rid[8:10], 0) + 1
-    if nichi_candidates:
-        sorted_nichi = sorted(nichi_candidates.keys())
-        if weekday == 6:
-            return sorted_nichi[0]
-        elif weekday == 7:
-            return sorted_nichi[-1]
-    return None
+    if wd == 4 and t >= CUTOFF:     # 金曜17:00〜 → 翌土曜
+        return now.date() + timedelta(days=1)
+    if wd == 5 and t <= CUTOFF:     # 土曜〜17:00 → 当日土曜
+        return now.date()
+    if wd == 5 and t > CUTOFF:      # 土曜17:01〜 → 翌日曜
+        return now.date() + timedelta(days=1)
+    if wd == 6 and t <= CUTOFF:     # 日曜〜17:00 → 当日日曜
+        return now.date()
+
+    # それ以外（月〜木・金17前・日17後）→ 直近の日曜
+    d = now.date()
+    while d.weekday() != 6:
+        d -= timedelta(days=1)
+    return d
 
 
 def _fetch_sections(day_str: str) -> list[list[str]]:
@@ -83,44 +81,22 @@ def _fetch_sections(day_str: str) -> list[list[str]]:
 
 
 @st.cache_data(ttl=300)
-def fetch_today_races() -> dict:
-    today = date.today()
-    today_str = today.strftime("%Y%m%d")
-    yesterday = today - timedelta(days=1)
+def fetch_today_races() -> tuple[dict, date]:
+    """(race_map, target_date) を返す。"""
+    target = _target_date()
     venue_by_code = {v: k for k, v in VENUE_CODE.items()}
-
-    def section_to_map(ids):
-        race_map = {}
-        for rid in ids:
+    race_map: dict = {}
+    for section_ids in _fetch_sections(target.strftime("%Y%m%d")):
+        for rid in section_ids:
             venue_name = venue_by_code.get(rid[4:6])
             race_num = int(rid[10:12])
             if venue_name:
                 race_map[(venue_name, race_num)] = rid
-        return race_map
-
-    today_nichi = _get_today_nichi()
-    if today_nichi:
-        sections = _fetch_sections(today_str)
-        for section_ids in sections:
-            if section_ids and section_ids[0][8:10] == today_nichi:
-                return section_to_map(section_ids)
-
-    yesterday_sections = _fetch_sections(yesterday.strftime("%Y%m%d"))
-    today_sections = _fetch_sections(today_str)
-    yesterday_nichi = set(
-        rid[8:10] for rid in (yesterday_sections[0] if yesterday_sections else [])
-    )
-    for section_ids in today_sections:
-        if section_ids and section_ids[0][8:10] not in yesterday_nichi:
-            return section_to_map(section_ids)
-
-    if today_sections:
-        return section_to_map(today_sections[-1])
-    return {}
+    return race_map, target
 
 
 def get_ipat_url(venue: str, race_num: int) -> str | None:
-    race_map = fetch_today_races()
+    race_map, _ = fetch_today_races()
     race_id = race_map.get((venue, race_num))
     if race_id:
         return f"https://race.sp.netkeiba.com/?pid=odds_view&race_id={race_id}"
@@ -262,10 +238,9 @@ NETKEIBA_USER = os.environ.get("NETKEIBA_USER", "")
 NETKEIBA_PASS = os.environ.get("NETKEIBA_PASS", "")
 
 def _make_context(p, cookie_str: str | None = None):
-    """ブラウザコンテキストを作成。cookie_strが指定された場合はそれを注入してユーザーセッションを引き継ぐ。"""
     context = p.chromium.launch_persistent_context(
         user_data_dir=IPAT_PROFILE,
-        headless=True,
+        headless=False,
         args=["--no-sandbox", "--disable-dev-shm-usage"],
         viewport={"width": 390, "height": 844},
     )
@@ -334,151 +309,156 @@ def _ensure_logged_in(page, log_lines: list):
     except Exception as e:
         log_lines.append(f"ログインエラー: {e}")
 
-def _odds_view_url(base_race_url: str, bet: dict) -> str:
-    m = re.search(r"race_id=(\d{12})", base_race_url)
-    race_id = m.group(1) if m else ""
-    cfg = BET_TYPES[bet["type_name"]]
-    housiki = f"&housiki={cfg['housiki']}" if cfg["housiki"] else ""
-    return (f"https://race.sp.netkeiba.com/?pid=odds_view"
-            f"&type={cfg['type_code']}{housiki}&race_id={race_id}")
+# IPAT式別コード（bet_id生成用）
+IPAT_SHIKIBETU = {
+    "単勝": 1, "複勝": 2, "枠連": 3, "馬連": 4,
+    "ワイド": 5, "馬単": 6,
+    "3連複": 7, "三連複": 7, "3連単": 8, "三連単": 8,
+}
 
-def _js_click(page, selector: str) -> bool:
-    return page.evaluate(f"""
-        (function() {{
-            var el = document.querySelector("{selector}");
-            if (!el) return false;
-            el.click();
-            return true;
-        }})()
-    """)
+def _build_ipat_bet_id(race_id: str, shikibetu: int, horses: list[int]) -> str:
+    """
+    IPAT bet_id形式: a{曜日}-{nichi}-{race}_b{式別}_c0_{馬番...}
+    曜日 = JS getDay() of date(year, venue_as_month, kai_as_day)
+    """
+    year  = int(race_id[0:4])
+    venue = int(race_id[4:6])   # 場コード → 月として使用
+    kai   = int(race_id[6:8])   # 回 → 日として使用
+    nichi = race_id[8:10]
+    race_num = int(race_id[10:12])
 
-def _check_horses(page, bet: dict, log_lines: list):
-    cfg = BET_TYPES[bet["type_name"]]
-    frm = cfg["frm"]
-    horses = bet["horses"]
-    if frm == "tan_b1":
-        for h in horses:
-            ok = _js_click(page, f"input[value*='_b1_c0_{h}']")
-            log_lines.append(f"  {'✅' if ok else '❌'} 単勝 馬番{h}")
-            page.wait_for_timeout(80)
-    elif frm == "tan_b2":
-        for h in horses:
-            ok = _js_click(page, f"input[value*='_b2_c0_{h}']")
-            log_lines.append(f"  {'✅' if ok else '❌'} 複勝 馬番{h}")
-            page.wait_for_timeout(80)
-    elif frm in ("multi2", "multi3"):
-        cols = ["frm1", "frm2"] if frm == "multi2" else ["frm1", "frm2", "frm3"]
-        for col in cols:
-            for h in horses:
-                ok = _js_click(page, f"input[name='{col}[]'][value='{h}']")
-                log_lines.append(f"  {'✅' if ok else '❌'} {col} 馬番{h}")
-                page.wait_for_timeout(80)
-
-def _click_add_button(page, bet: dict, log_lines: list):
-    cfg = BET_TYPES[bet["type_name"]]
-    if cfg["frm"] in ("tan_b1", "tan_b2"):
-        js = """
-            (function() {
-                var btn = document.querySelector('button.AddBtn');
-                if (btn) { btn.click(); return 'clicked AddBtn'; }
-                return 'AddBtn not found';
-            })()
-        """
-    else:
-        js = """
-            (function() {
-                if (typeof add_odds === 'function') {
-                    add_odds('bet');
-                    return 'add_odds(bet) called';
-                }
-                var btns = document.querySelectorAll('button.SubmitBtn');
-                for (var b of btns) {
-                    if (b.textContent.indexOf('まとめて') >= 0) {
-                        b.click();
-                        return 'SubmitBtn clicked';
-                    }
-                }
-                return 'no button found';
-            })()
-        """
     try:
-        with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-            result = page.evaluate(js)
-        log_lines.append(f"  → {result}")
-        log_lines.append(f"  遷移先URL: {page.url}")
-    except Exception as e:
-        log_lines.append(f"  → ナビゲーション待機失敗: {e}")
-        log_lines.append(f"  現在URL: {page.url}")
+        d = datetime.date(year, venue, kai)
+        # Python weekday(): Mon=0, Sun=6 → JS getDay(): Sun=0, Mon=1, ..., Sat=6
+        js_day = (d.weekday() + 1) % 7
+    except ValueError:
+        js_day = 0
 
-def _fill_amount_on_betlist(page, amount: int, log_lines: list):
-    page.wait_for_timeout(800)
-    log_lines.append(f"  金額入力ページ: {page.url}")
-    filled_count = page.evaluate(f"""
-        (function() {{
-            var selectors = [
-                'input[type="number"]',
-                'input[name*="kin"]', 'input[id*="kin"]',
-                'input[name*="money"]', 'input[name*="amount"]',
-                'input[placeholder*="円"]', 'input[placeholder*="金額"]',
-                'input[class*="Kin"]', 'input[class*="Amount"]'
-            ];
-            var count = 0;
-            for (var sel of selectors) {{
-                var els = document.querySelectorAll(sel);
-                for (var el of els) {{
-                    if (el.type !== 'hidden') {{
-                        el.value = '{amount // 100}';
-                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                        count++;
-                    }}
-                }}
-            }}
-            return count;
-        }})()
-    """)
-    if filled_count > 0:
-        log_lines.append(f"  ✅ 金額 {amount:,}円 入力（{filled_count}箇所）")
-    else:
-        log_lines.append(f"  ⚠️  金額入力欄が見つかりません。手動で {amount:,}円 を入力してください。")
+    horses_part = "_".join(str(h) for h in horses)
+    return f"a{js_day}-{nichi}-{race_num}_b{shikibetu}_c0_{horses_part}"
 
 
 def input_bets_to_netkeiba(base_race_url: str, bets: list, ipat_cookie: str | None = None) -> tuple[str, str]:
     """
-    ヘッドレスPlaywrightで買い目・金額を入力する。
-    ipat_cookieが指定された場合はユーザーのセッションで操作し、iPhone側でbet_listが確認できる。
-    Returns: (log_str, bet_list_url)
+    可視ブラウザでodds_viewを開き、券種選択・馬番チェック・買い目追加・金額入力まで自動化する。
+    完了後もブラウザを開いたままにし、ユーザーが確認・投票できる状態にする。
+    Returns: (log_str, bet_url)
     """
-    log_lines = []
     m = re.search(r"race_id=(\d{12})", base_race_url)
     race_id = m.group(1) if m else ""
-    bet_list_url = f"https://race.sp.netkeiba.com/ipat/bet_list.html?race_id={race_id}"
+    bet_url = f"https://race.sp.netkeiba.com/?pid=bet&race_id={race_id}"
+    bets_copy = list(bets)
+    result: dict = {"log": "", "done": False}
 
-    with sync_playwright() as p:
-        context = _make_context(p, cookie_str=ipat_cookie)
-        page = context.new_page()
-        _ensure_logged_in(page, log_lines)
+    def _run():
+        log_lines = []
+        with sync_playwright() as p:
+            context = _make_context(p, cookie_str=ipat_cookie)
+            page = context.new_page()
+            _ensure_logged_in(page, log_lines)
 
-        for i, bet in enumerate(bets):
-            log_lines.append(f"\n{'='*40}")
-            log_lines.append(f"買い目 {i+1}: {bet_label(bet)}")
-            try:
-                url = _odds_view_url(base_race_url, bet)
-                log_lines.append(f"→ {url}")
+            for i, bet in enumerate(bets_copy):
+                log_lines.append(f"\n{'='*40}")
+                log_lines.append(f"買い目 {i+1}: {bet_label(bet)}")
+
+                cfg = BET_TYPES.get(bet["type_name"])
+                if not cfg:
+                    log_lines.append(f"  ❌ 未対応: {bet['type_name']}")
+                    continue
+
+                # 券種別 odds_view URLへ
+                housiki_param = f"&housiki={cfg['housiki']}" if cfg["housiki"] else ""
+                url = (f"https://race.sp.netkeiba.com/?pid=odds_view"
+                       f"&type={cfg['type_code']}{housiki_param}&race_id={race_id}")
                 page.goto(url, timeout=30000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
-                page.wait_for_timeout(500)
-                _check_horses(page, bet, log_lines)
-                page.wait_for_timeout(150)
-                _click_add_button(page, bet, log_lines)
-                _fill_amount_on_betlist(page, bet["amount"], log_lines)
-            except Exception as e:
-                log_lines.append(f"  ❌ エラー: {e}")
+                page.wait_for_timeout(1500)
+                log_lines.append(f"  ページ: {page.url}")
 
-        log_lines.append("\n✅ 買い目入力完了")
-        context.close()
+                # 馬番チェック
+                horses = bet["horses"]
+                frm = cfg["frm"]
+                if frm in ("tan_b1", "tan_b2"):
+                    b_code = "1" if frm == "tan_b1" else "2"
+                    for h in horses:
+                        ok = page.evaluate(
+                            f"() => {{ var e=document.querySelector(\"input[value*='_b{b_code}_c0_{h}']\");"
+                            f" if(e){{e.click();return true;}} return false; }}"
+                        )
+                        log_lines.append(f"  {'✅' if ok else '❌'} 馬番{h}")
+                elif frm in ("multi2", "multi3"):
+                    n_cols = 2 if frm == "multi2" else 3
+                    for col_idx in range(min(n_cols, len(horses))):
+                        h = horses[col_idx]
+                        col = f"frm{col_idx + 1}"
+                        ok = page.evaluate(
+                            f"() => {{ var e=document.querySelector(\"input[name='{col}[]'][value='{h}']\");"
+                            f" if(e){{e.click();return true;}} return false; }}"
+                        )
+                        log_lines.append(f"  {'✅' if ok else '❌'} {col} 馬番{h}")
 
-    return "\n".join(log_lines), bet_list_url
+                page.wait_for_timeout(300)
+
+                # 買い目追加ボタンをクリック
+                click_result = page.evaluate("""() => {
+                    var btn = document.querySelector('button.AddBtn');
+                    if (btn) { btn.click(); return 'AddBtn'; }
+                    var btns = document.querySelectorAll('button.SubmitBtn');
+                    for (var b of btns) {
+                        if (b.textContent.includes('まとめて')) { b.click(); return 'SubmitBtn(まとめて)'; }
+                    }
+                    return 'ボタン未検出';
+                }""")
+                log_lines.append(f"  ボタン: {click_result}")
+
+                page.wait_for_load_state("networkidle", timeout=8000)
+                page.wait_for_timeout(800)
+                log_lines.append(f"  遷移後: {page.url}")
+
+            # ?pid=bet ページへ（金額入力）
+            page.goto(bet_url, timeout=20000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2000)
+            log_lines.append(f"\n金額入力ページ: {page.url}")
+
+            # 金額フィールドを探して入力（100円単位）
+            for i, bet in enumerate(bets_copy):
+                amount_100 = bet["amount"] // 100
+                filled = page.evaluate(f"""() => {{
+                    var els = Array.from(document.querySelectorAll(
+                        'input[type="number"], input[class*="Kin"], input[class*="kin"], input[name*="money"], input[name*="kin"]'
+                    )).filter(e => e.type !== 'hidden');
+                    var el = els[{i}];
+                    if (el) {{
+                        el.value = '{amount_100}';
+                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        return true;
+                    }}
+                    return false;
+                }}""")
+                log_lines.append(f"  買い目{i+1} 金額{bet['amount']:,}円: {'✅' if filled else '❌'}")
+
+            log_lines.append("\n✅ 入力完了 — ブラウザで確認してIPAT投票を進めてください")
+            result["log"] = "\n".join(log_lines)
+            result["done"] = True
+            page.bring_to_front()
+
+            try:
+                page.wait_for_event("close", timeout=1800000)
+            except Exception:
+                pass
+            context.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    for _ in range(120):
+        if result["done"]:
+            break
+        time.sleep(0.5)
+
+    return result.get("log", "タイムアウト: ブラウザの準備に時間がかかっています"), bet_url
 
 
 # ════════════════════════════════════════
@@ -497,8 +477,9 @@ for key, default in [
 
 # ─── サイドバー ───────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 今日のレース")
-    race_map = fetch_today_races()
+    race_map, race_date = fetch_today_races()
+    weekday_ja = ["月", "火", "水", "木", "金", "土", "日"][race_date.weekday()]
+    st.markdown(f"### {race_date.month}/{race_date.day}({weekday_ja})のレース")
     if race_map:
         venues_today = sorted(set(v for v, _ in race_map.keys()))
         st.caption(f"開催：{'、'.join(venues_today)}")
@@ -613,8 +594,8 @@ if recognized:
                         st.session_state.recognized = ""
                         st.rerun()
             else:
-                st.error(f"今日の開催に「{label}」が見つかりません。"
-                         f"（今日の開催：{'、'.join(venues_today) if venues_today else 'なし'}）")
+                st.error(f"{race_date.month}/{race_date.day}の開催に「{label}」が見つかりません。"
+                         f"（開催：{'、'.join(venues_today) if venues_today else 'なし'}）")
                 if st.button("クリア"):
                     st.session_state.recognized = ""
                     st.rerun()
@@ -653,15 +634,13 @@ if st.session_state.bets:
             st.caption("※ IPATセッション未連携のため、iPhone側で買い目を確認できません")
 
         if st.button("🏇 netkeiba に自動入力", type="primary", use_container_width=True):
-            with st.spinner("自動入力中..."):
-                log, bet_list_url = input_bets_to_netkeiba(
+            with st.spinner("ブラウザを起動して買い目を入力中..."):
+                log, _ = input_bets_to_netkeiba(
                     st.session_state.race_url,
                     st.session_state.bets,
                     ipat_cookie=st.session_state.ipat_cookie or None,
                 )
-            st.success("✅ 買い目入力完了")
-            st.link_button("📋 bet_list を開く（同じセッションで確認）", bet_list_url,
-                           use_container_width=True)
+            st.success("✅ 買い目入力完了 — 開いたブラウザで「IPAT投票へすすむ」を押してください")
             with st.expander("操作ログ"):
                 st.text(log)
 
