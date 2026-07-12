@@ -69,6 +69,25 @@ def require_app_password() -> None:
     st.stop()
 
 
+def _show_recent_log(lines: int = 15) -> None:
+    """直近の警告/エラーログを画面に表示する（原因調査用）。
+
+    ログには認証情報を書かない運用のため、そのまま表示して安全。
+    """
+    try:
+        log_path = data_dir() / "mylogic.log"
+        if not log_path.exists():
+            return
+        recent = [l for l in log_path.read_text(encoding="utf-8",
+                                                errors="replace").splitlines()
+                  if " WARNING " in l or " ERROR " in l][-lines:]
+        if recent:
+            with st.expander("🔍 直近のエラーログ（調査用）", expanded=True):
+                st.code("\n".join(recent), language=None)
+    except OSError:
+        pass
+
+
 # ─── 分析の実行 ──────────────────────────────────────────────
 def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
     repo = Repository()
@@ -114,9 +133,8 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
                 "考えられる原因：\n"
                 "1. IDまたはパスワードの誤り（値を再確認してください）\n"
                 "2. クラウド環境の場合：ブラウザ(Chromium)の準備失敗、または "
-                "netkeibaがクラウドIPからのアクセスを制限している可能性\n\n"
-                "詳細はログ（クラウドは Manage app → Logs、ローカルは "
-                "data/mylogic.log）の直近のエラー行を確認してください。")
+                "netkeibaがクラウドIPからのアクセスを制限している可能性")
+            _show_recent_log()
         return None
 
     targets = [e for e in race.entries if not e.is_cancelled]
