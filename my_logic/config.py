@@ -56,6 +56,23 @@ def data_dir() -> Path:
     return d
 
 
+def browser_launch_configs() -> list[dict]:
+    """Playwright chromium の起動構成を優先順に返す。
+
+    1. 通常構成（ローカルはこれで動く）
+    2. 省リソース構成（クラウドのメモリ制限・依存不足でのクラッシュ対策）
+    3. システム版Chromium（packages.txt の chromium。依存ライブラリ完備）
+    """
+    base = ["--no-sandbox", "--disable-dev-shm-usage"]
+    hardened = base + ["--disable-gpu", "--no-zygote", "--single-process",
+                       "--disable-extensions", "--disable-background-networking"]
+    configs: list[dict] = [{"args": base}, {"args": hardened}]
+    for path in ("/usr/bin/chromium", "/usr/bin/chromium-browser"):
+        if os.path.exists(path):
+            configs.append({"args": hardened, "executable_path": path})
+    return configs
+
+
 _PW_INSTALL_TRIED = False
 
 

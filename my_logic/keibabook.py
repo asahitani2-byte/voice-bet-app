@@ -63,48 +63,74 @@ def _kb_login() -> dict:
     login_id, password = _kb_credentials()
     if not login_id or not password:
         return {}
+    from .config import browser_launch_configs, try_install_playwright_chromium
     try:
         from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            ctx = browser.new_context()
-            page = ctx.new_page()
-            page.goto(KB_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
-            for sel in ('input[name="login_id"]', 'input[type="text"]', '#login_id'):
-                if page.query_selector(sel):
-                    page.fill(sel, login_id)
-                    break
-            for sel in ('input[name="password"]', 'input[type="password"]',
-                        '#password', '#js-password'):
-                if page.query_selector(sel):
-                    page.fill(sel, password)
-                    break
-            for sel in ('input[type="submit"]', 'button[type="submit"]', '.login_btn'):
-                if page.query_selector(sel):
-                    page.click(sel)
-                    break
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
-            html = page.content()
-            ok = ("logout" in html.lower() or "ログアウト" in html
-                  or "mypage" in html.lower())
-            cookies = {c["name"]: c["value"] for c in ctx.cookies()
-                       if "keibabook" in c.get("domain", "")}
-            browser.close()
-        if not ok or not cookies:
-            logger.error("keibabookログイン失敗")
-            return {}
-        logger.info("keibabookログイン成功")
-        return cookies
-    except Exception as e:
-        # クラウド環境でchromium未導入の場合は一度だけ導入して再試行
-        from .config import try_install_playwright_chromium
-        if try_install_playwright_chromium(str(e)):
-            return _kb_login()
-        logger.error("keibabookログイン例外: %s", type(e).__name__)
+    except ImportError:
         return {}
+    last_err = ""
+    for round_ in range(2):  # 2周目はChromium導入後の再試行
+        try:
+            with sync_playwright() as p:
+                for cfg in browser_launch_configs():
+                    browser = None
+                    try:
+                        browser = p.chromium.launch(headless=True, **cfg)
+                        cookies, ok = _run_kb_login_flow(
+                            browser, login_id, password)
+                        browser.close()
+                        if not ok or not cookies:
+                            logger.error("keibabookログイン失敗"
+                                         "（ID/パスワード誤りの可能性）")
+                            return {}
+                        logger.info("keibabookログイン成功")
+                        return cookies
+                    except Exception as e:
+                        last_err = f"{type(e).__name__}: {str(e)[:150]}"
+                        logger.warning("kbブラウザ構成 %s で失敗 → 次の構成: %s",
+                                       cfg.get("executable_path", "playwright"),
+                                       last_err)
+                        if browser:
+                            try:
+                                browser.close()
+                            except Exception:
+                                pass
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:150]}"
+        if round_ == 0 and try_install_playwright_chromium(last_err):
+            continue
+        break
+    logger.error("keibabookログイン例外: %s", last_err)
+    return {}
+
+
+def _run_kb_login_flow(browser, login_id: str, password: str) -> tuple[dict, bool]:
+    """起動済みブラウザでkeibabookログインを実行する。"""
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    page.goto(KB_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(2000)
+    for sel in ('input[name="login_id"]', 'input[type="text"]', '#login_id'):
+        if page.query_selector(sel):
+            page.fill(sel, login_id)
+            break
+    for sel in ('input[name="password"]', 'input[type="password"]',
+                '#password', '#js-password'):
+        if page.query_selector(sel):
+            page.fill(sel, password)
+            break
+    for sel in ('input[type="submit"]', 'button[type="submit"]', '.login_btn'):
+        if page.query_selector(sel):
+            page.click(sel)
+            break
+    page.wait_for_load_state("domcontentloaded", timeout=15000)
+    page.wait_for_timeout(2000)
+    html = page.content()
+    ok = ("logout" in html.lower() or "ログアウト" in html
+          or "mypage" in html.lower())
+    cookies = {c["name"]: c["value"] for c in ctx.cookies()
+               if "keibabook" in c.get("domain", "")}
+    return cookies, ok
 
 
 def _kb_cookies(force: bool = False) -> dict:

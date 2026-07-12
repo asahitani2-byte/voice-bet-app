@@ -114,70 +114,88 @@ def _login_with_credentials() -> dict:
     password = get_secret("NETKEIBA_PASSWORD") or get_secret("NETKEIBA_PASS")
     if not login_id or not password:
         return {}
-    return _login_with_credentials_impl(login_id, password, retry_ok=True)
-
-
-def _login_with_credentials_impl(login_id: str, password: str,
-                                 retry_ok: bool = False) -> dict:
+    from .config import browser_launch_configs, try_install_playwright_chromium
     try:
         from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            # ログインはPC版ページで行う（モバイルUAだとフォーム構成が
-            # 変わり送信ボタンを特定できない）。Cookieはドメイン共通
-            ctx = browser.new_context(user_agent=UA_PC)
-            page = ctx.new_page()
-            page.goto("https://regist.netkeiba.com/account/?pid=login",
-                      timeout=30000)
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-            for sel in ("input[name='login_id']", "input[name='email']",
-                        "input[type='email']", "input[type='text']"):
-                if page.query_selector(sel):
-                    page.fill(sel, login_id)
-                    break
-            pw_sel = None
-            for sel in ("input[name='pswd']", "input[name='password']",
-                        "input[type='password']"):
-                if page.query_selector(sel):
-                    page.fill(sel, password)
-                    pw_sel = sel
-                    break
-            # ページ内に検索フォーム等の別formがあるため、必ず
-            # 「パスワード欄と同じform内」の送信ボタンを押す
-            # （netkeibaのログイン送信は input[type='image']）
-            submit_sel = (
-                f"form:has({pw_sel}) input[type='image'], "
-                f"form:has({pw_sel}) input[type='submit'], "
-                f"form:has({pw_sel}) button[type='submit']") if pw_sel else None
-            if submit_sel and page.query_selector(submit_sel):
-                page.click(submit_sel)
-            elif pw_sel:
-                page.press(pw_sel, "Enter")  # フォールバック
-            else:
-                raise RuntimeError("パスワード入力欄が見つかりません")
-            page.wait_for_load_state("domcontentloaded", timeout=20000)
-            page.goto("https://race.sp.netkeiba.com/", timeout=20000)
-            raw = ctx.cookies("https://race.sp.netkeiba.com/")
-            browser.close()
-        cookies = {c["name"]: c["value"] for c in raw
-                   if ".netkeiba.com" in c.get("domain", "")}
-        if _cookies_valid(cookies):
-            logger.info("ID/パスワードによるログイン成功")
-            return cookies
-        logger.error("ログイン試行後もセッションCookieが取得できず")
+    except ImportError:
         return {}
-    except Exception as e:
-        # クラウド環境でchromium未導入の場合は一度だけ導入して再試行
-        from .config import try_install_playwright_chromium
-        if retry_ok and try_install_playwright_chromium(str(e)):
+    last_err = ""
+    for round_ in range(2):  # 2周目はChromium導入後の再試行
+        try:
+            with sync_playwright() as p:
+                # 起動構成を通常→省リソース→システムChromiumの順で試す
+                # （クラウドのTargetClosedError＝起動直後クラッシュ対策）
+                for cfg in browser_launch_configs():
+                    browser = None
+                    try:
+                        browser = p.chromium.launch(headless=True, **cfg)
+                        cookies = _run_netkeiba_login_flow(
+                            browser, login_id, password)
+                        browser.close()
+                        if _cookies_valid(cookies):
+                            logger.info("ID/パスワードによるログイン成功")
+                            return cookies
+                        logger.error("ログイン試行後もセッションCookieが取得できず"
+                                     "（ID/パスワード誤りの可能性）")
+                        return {}
+                    except Exception as e:
+                        last_err = f"{type(e).__name__}: {str(e)[:150]}"
+                        logger.warning("ブラウザ構成 %s で失敗 → 次の構成: %s",
+                                       cfg.get("executable_path", "playwright"),
+                                       last_err)
+                        if browser:
+                            try:
+                                browser.close()
+                            except Exception:
+                                pass
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:150]}"
+        if round_ == 0 and try_install_playwright_chromium(last_err):
             logger.info("Chromiumを導入してログインを再試行")
-            return _login_with_credentials_impl(login_id, password,
-                                                retry_ok=False)
-        # 原因調査用に例外の要点を残す（認証情報は含めない）
-        logger.error("Playwrightログイン失敗: %s: %s",
-                     type(e).__name__, str(e)[:200])
-        return {}
+            continue
+        break
+    logger.error("Playwrightログイン失敗: %s", last_err)
+    return {}
+
+
+def _run_netkeiba_login_flow(browser, login_id: str, password: str) -> dict:
+    """起動済みブラウザでnetkeibaログインを実行しCookieを返す。"""
+    # ログインはPC版ページで行う（モバイルUAだとフォーム構成が
+    # 変わり送信ボタンを特定できない）。Cookieはドメイン共通
+    ctx = browser.new_context(user_agent=UA_PC)
+    page = ctx.new_page()
+    page.goto("https://regist.netkeiba.com/account/?pid=login", timeout=30000)
+    page.wait_for_load_state("domcontentloaded", timeout=15000)
+    for sel in ("input[name='login_id']", "input[name='email']",
+                "input[type='email']", "input[type='text']"):
+        if page.query_selector(sel):
+            page.fill(sel, login_id)
+            break
+    pw_sel = None
+    for sel in ("input[name='pswd']", "input[name='password']",
+                "input[type='password']"):
+        if page.query_selector(sel):
+            page.fill(sel, password)
+            pw_sel = sel
+            break
+    # ページ内に検索フォーム等の別formがあるため、必ず
+    # 「パスワード欄と同じform内」の送信ボタンを押す
+    # （netkeibaのログイン送信は input[type='image']）
+    submit_sel = (
+        f"form:has({pw_sel}) input[type='image'], "
+        f"form:has({pw_sel}) input[type='submit'], "
+        f"form:has({pw_sel}) button[type='submit']") if pw_sel else None
+    if submit_sel and page.query_selector(submit_sel):
+        page.click(submit_sel)
+    elif pw_sel:
+        page.press(pw_sel, "Enter")  # フォールバック
+    else:
+        raise RuntimeError("パスワード入力欄が見つかりません")
+    page.wait_for_load_state("domcontentloaded", timeout=20000)
+    page.goto("https://race.sp.netkeiba.com/", timeout=20000)
+    raw = ctx.cookies("https://race.sp.netkeiba.com/")
+    return {c["name"]: c["value"] for c in raw
+            if ".netkeiba.com" in c.get("domain", "")}
 
 
 def cookie_sources(force: bool = False):
