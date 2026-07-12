@@ -196,14 +196,12 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
     out = summarize(race, ranked)
     out.warnings = global_warnings
 
-    # 厩舎の話（競馬ブック）— 中央のみ。補助情報のため失敗しても分析は継続
-    if not nar:
-        msg.write("厩舎の話（競馬ブック）を取得中...")
-        danwa, danwa_warn = fetch_danwa(race_id, repo,
-                                        force_refresh=not use_cache)
-        out.danwa = danwa
-        if danwa_warn:
-            out.warnings.append(danwa_warn)
+    # 厩舎の話（競馬ブック）— 中央・地方両対応。失敗しても分析は継続
+    msg.write("厩舎の話（競馬ブック）を取得中...")
+    danwa, danwa_warn = fetch_danwa(race_id, repo, force_refresh=not use_cache)
+    out.danwa = danwa
+    if danwa_warn:
+        out.warnings.append(danwa_warn)
 
     run_id = repo.save_analysis(out)
     if run_id is None:
@@ -551,8 +549,7 @@ def _run_batch(sel: dict) -> None:
             msg.write(f"{venue}{rno}R を分析中（{done}/{total}）")
             bar.progress(done / max(total, 1))
             try:
-                result = analyze_race(repo, client, rid,
-                                      with_danwa=(sel["kind"] == "jra"))
+                result = analyze_race(repo, client, rid)
                 rows_all.extend(result_to_rows(result))
                 rows_all.append([""])
                 ok_races += 1

@@ -199,14 +199,17 @@ def parse_danwa_html(html: str) -> dict[str, str]:
 
 def fetch_danwa(nk_race_id: str, repo: Repository,
                 force_refresh: bool = False) -> tuple[dict[str, str], str]:
-    """netkeiba race_idから厩舎の話を取得する。
+    """netkeiba race_idから厩舎の話を取得する（中央・地方両対応）。
 
     Returns: ({馬番: 談話}, 警告メッセージ)。失敗しても例外にしない
     （厩舎の話は補助情報のため、分析全体を止めない）。
     """
+    from .nar import is_nar_race_id
+    if is_nar_race_id(nk_race_id):
+        return _fetch_danwa_nar(nk_race_id, repo, force_refresh)
     kb_id = netkeiba_to_keibabook_id(nk_race_id)
     if not kb_id:
-        return {}, "keibabook ID変換不可（中央以外のrace_id）"
+        return {}, "keibabook ID変換不可"
     cookies = _kb_cookies()
     authed = bool(cookies)
     # 未ログインは先頭数頭分のみのため、認証状態をキャッシュキーに含める
@@ -258,6 +261,123 @@ def fetch_danwa(nk_race_id: str, repo: Repository,
         return {}, "厩舎の話が見つかりませんでした（掲載前の可能性）"
     repo.cache_set(key, json.dumps(danwa, ensure_ascii=False))
     logger.info("厩舎の話 取得 nk_id=%s kb_id=%s horses=%d authed=%s",
+                nk_race_id, kb_id, len(danwa), authed)
+    warn = ("" if authed else
+            "keibabookログイン未設定のため厩舎の話は一部の馬のみです")
+    return danwa, warn
+
+
+# ─── 地方（chihou）の厩舎の話 ────────────────────────────────
+# 地方のkeibabook IDは {開催日8}{当日の開催順idx2}{R番号2}{月日4} の16桁。
+# idxは日ごとの連番のため、日程ページ（/chihou/nittei/）から
+# 「場名タブ（固定場コード）→ その場のsyutuba ID」の2段で解決する。
+# keibabookが掲載していない場（例: 一部の地方場）は取得不可として警告のみ。
+
+def _kb_session_cookies() -> tuple[dict, bool]:
+    cookies = _kb_cookies()
+    return cookies, bool(cookies)
+
+
+def nar_kb_id(date_str: str, idx: str, race_no: int) -> str:
+    """地方keibabook ID: {YYYYMMDD}{idx}{R2}{MMDD}。"""
+    return f"{date_str}{idx}{race_no:02d}{date_str[4:]}"
+
+
+def _chihou_venue_idx(date_str: str, venue_name: str, cookies: dict,
+                      repo: Repository, force_refresh: bool) -> str | None:
+    """指定日・場の「当日の開催順インデックス」を日程ページから解決する。"""
+    key = f"kb_chihou_idx:{date_str}:{venue_name}"
+    cached = None if force_refresh else repo.cache_get(key, TTL_DANWA)
+    if cached is not None:
+        return cached or None
+
+    def _get(url: str) -> str | None:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                             cookies=cookies, timeout=15)
+            return r.text if r.status_code == 200 else None
+        except requests.RequestException as e:
+            logger.warning("kb日程ページ取得失敗 url=%s err=%s",
+                           url, type(e).__name__)
+            return None
+
+    def _find_idx(html: str) -> str | None:
+        ids = re.findall(r"/chihou/(?:syutuba|danwa/\d|seiseki)/(\d{16})", html)
+        for i in ids:
+            if i.startswith(date_str) and i.endswith(date_str[4:]):
+                return i[8:10]
+        return None
+
+    idx: str | None = None
+    html = _get(f"https://s.keibabook.co.jp/chihou/nittei/{date_str}")
+    if html:
+        # 表示中ページ自体が対象の場か（タイトル等に場名）
+        title_zone = html[:4000]
+        if venue_name in title_zone and _find_idx(html):
+            idx = _find_idx(html)
+        if idx is None:
+            # 場タブ（/chihou/nittei/{date}{固定場コード2桁}）から対象の場を探す
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.select("a[href*='/chihou/nittei/']"):
+                if a.get_text(strip=True) == venue_name:
+                    m = re.search(rf"/chihou/nittei/({date_str}\d{{2}})",
+                                  a.get("href") or "")
+                    if m:
+                        html2 = _get(
+                            f"https://s.keibabook.co.jp/chihou/nittei/{m.group(1)}")
+                        if html2:
+                            idx = _find_idx(html2)
+                    break
+    repo.cache_set(key, idx or "")
+    if idx is None:
+        logger.info("kb地方: %s %s の掲載なし", date_str, venue_name)
+    return idx
+
+
+def _fetch_danwa_nar(nk_race_id: str, repo: Repository,
+                     force_refresh: bool = False) -> tuple[dict[str, str], str]:
+    """地方レースの厩舎の話を取得する。"""
+    from .nar import NAR_VENUES
+    date_str = nk_race_id[0:4] + nk_race_id[6:10]
+    venue = NAR_VENUES.get(nk_race_id[4:6], "")
+    race_no = int(nk_race_id[10:12])
+    if not venue:
+        return {}, "厩舎の話: 場コード不明"
+    cookies, authed = _kb_session_cookies()
+    key = f"danwa:{nk_race_id}:{'auth' if authed else 'anon'}"
+    cached = None if force_refresh else repo.cache_get(key, TTL_DANWA)
+    if cached is not None:
+        try:
+            return json.loads(cached), ""
+        except json.JSONDecodeError:
+            pass
+    idx = _chihou_venue_idx(date_str, venue, cookies, repo, force_refresh)
+    if idx is None:
+        return {}, f"厩舎の話: keibabookに{venue}の掲載がありません"
+    kb_id = nar_kb_id(date_str, idx, race_no)
+    url = f"https://s.keibabook.co.jp/chihou/danwa/1/{kb_id}"
+    last_err = ""
+    danwa: dict[str, str] = {}
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                             cookies=cookies, timeout=20)
+            if r.status_code == 200:
+                danwa = parse_danwa_html(r.text)
+                break
+            last_err = f"HTTP {r.status_code}"
+            if r.status_code in (403, 429):
+                break
+        except requests.RequestException as e:
+            last_err = type(e).__name__
+        time.sleep(1.5 * (attempt + 1))
+    if not danwa:
+        logger.info("kb地方 談話なし url=%s last=%s", url, last_err)
+        return {}, ("厩舎の話が見つかりませんでした"
+                    "（掲載前・未掲載の可能性）" if not last_err else
+                    f"厩舎の話を取得できませんでした（{last_err}）")
+    repo.cache_set(key, json.dumps(danwa, ensure_ascii=False))
+    logger.info("kb地方 厩舎の話 nk_id=%s kb_id=%s horses=%d authed=%s",
                 nk_race_id, kb_id, len(danwa), authed)
     warn = ("" if authed else
             "keibabookログイン未設定のため厩舎の話は一部の馬のみです")

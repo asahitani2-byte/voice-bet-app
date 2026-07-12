@@ -60,3 +60,11 @@ class TestParseDanwa:
         </table>"""
         d = parse_danwa_html(html)
         assert d == {"4": "馬Bの談話"}
+
+
+class TestChihouId:
+    def test_nar_kb_id(self):
+        """地方ID: {開催日}{当日idx}{R}{月日}（浦和7/13 11R の実例）。"""
+        from my_logic.keibabook import nar_kb_id
+        assert nar_kb_id("20260713", "01", 11) == "2026071301110713"
+        assert nar_kb_id("20260713", "02", 1) == "2026071302010713"

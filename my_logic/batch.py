@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 from .analyzer import rank_horses, select_candidate, summarize
 from .keibabook import fetch_danwa
 from .models import HorseAnalysisResult, RaceAnalysisResult
-from .nar import is_nar_race_id, select_candidate_nar
+from .nar import NAR_VENUES, is_nar_race_id, select_candidate_nar
 from .netkeiba_client import BlockedError, NetkeibaClient, NetkeibaError
 from .repository import Repository
 
@@ -27,11 +27,6 @@ logger = logging.getLogger("my_logic")
 JRA_VENUES = {
     "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
     "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉",
-}
-NAR_VENUES = {
-    "30": "門別", "35": "盛岡", "36": "水沢", "42": "浦和", "43": "船橋",
-    "44": "大井", "45": "川崎", "46": "金沢", "47": "笠松", "48": "名古屋",
-    "50": "園田", "51": "姫路", "54": "高知", "55": "佐賀", "65": "帯広",
 }
 _WD = ["月", "火", "水", "木", "金", "土", "日"]
 
@@ -112,9 +107,12 @@ def get_nar_venues(client: NetkeibaClient, repo: Repository,
             return [tuple(x) for x in json.loads(cached)]
         except json.JSONDecodeError:
             pass
+    # 注意: ?pid=race_list&kaisai_date= は未来日を無視して当日を返すため
+    # /top/race_list.html パスを使う（タブに表示中の場は含まれないので
+    # 表示中race_idからの補完と合算する）
     r = client._request(
         "GET",
-        f"https://nar.sp.netkeiba.com/?pid=race_list&kaisai_date={date_str}")
+        f"https://nar.sp.netkeiba.com/top/race_list.html?kaisai_date={date_str}")
     codes = sorted(set(
         m[4:6] for m in re.findall(r"kaisai_id=(\d{10})", r.text)
         if m[6:] == date_str[4:]))
@@ -176,7 +174,7 @@ def analyze_race(repo: Repository, client: NetkeibaClient, race_id: str,
         results.append(res)
     out = summarize(race, rank_horses(results))
     out.warnings = warnings
-    if with_danwa and not nar:
+    if with_danwa:
         danwa, danwa_warn = fetch_danwa(race_id, repo,
                                         force_refresh=client.force_refresh)
         out.danwa = danwa
