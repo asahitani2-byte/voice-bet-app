@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 from streamlit_mic_recorder import mic_recorder
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 
-st.set_page_config(page_title="音声馬券メーカー", page_icon="🎤", layout="centered")
+st.set_page_config(page_title="WINSみちこ", page_icon="🎤", layout="centered")
 
 # ─── Myロジック分析（分離パッケージ）＋アプリ簡易認証 ───────
 # APP_PASSWORD が設定されている場合のみ認証ゲートが有効になる
@@ -1621,7 +1621,7 @@ _kv_path = _pl.Path(__file__).parent / "keymage.png"
 if _kv_path.exists():
     st.image(str(_kv_path), use_container_width=True)
 
-st.title("WinVoice")
+st.title("WINSみちこ")
 
 # セッション初期化
 for key, default in [

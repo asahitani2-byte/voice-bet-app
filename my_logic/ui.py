@@ -65,7 +65,7 @@ def require_app_password() -> None:
                 st.session_state["_app_authed"] = False
                 st.rerun()
         return
-    st.title("🔐 WINVOICE")
+    st.title("🔐 WINSみちこ")
     st.caption("アプリパスワードを入力してください")
     entered = st.text_input("パスワード", type="password", key="_app_pw_input")
     if st.button("ログイン", type="primary"):
