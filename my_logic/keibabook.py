@@ -193,23 +193,33 @@ def fetch_danwa(nk_race_id: str, repo: Repository,
             pass
 
     def _get(cks: dict) -> dict[str, str] | None:
+        """リトライ付きでdanwaページを取得（クラウド環境の不安定さ対策）。"""
         url = f"https://s.keibabook.co.jp/cyuou/danwa/0/{kb_id}"
-        try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
-                             cookies=cks, timeout=15)
-        except requests.RequestException as e:
-            logger.warning("厩舎の話 通信失敗 url=%s err=%s",
-                           url, type(e).__name__)
-            return None
-        if r.status_code != 200:
-            logger.warning("厩舎の話 取得失敗 status=%s url=%s",
-                           r.status_code, url)
-            return None
-        return parse_danwa_html(r.text)
+        last_err = ""
+        for attempt in range(3):
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                                 cookies=cks, timeout=20)
+                if r.status_code == 200:
+                    return parse_danwa_html(r.text)
+                last_err = f"HTTP {r.status_code}"
+                logger.warning("厩舎の話 取得失敗 status=%s try=%d url=%s",
+                               r.status_code, attempt + 1, url)
+                if r.status_code in (403, 429):
+                    break  # ブロック系はリトライしない
+            except requests.RequestException as e:
+                last_err = type(e).__name__
+                logger.warning("厩舎の話 通信失敗 try=%d url=%s err=%s",
+                               attempt + 1, url, last_err)
+            time.sleep(1.5 * (attempt + 1))
+        logger.warning("厩舎の話 リトライ上限 url=%s last=%s", url, last_err)
+        return None
 
     danwa = _get(cookies)
     if danwa is None:
-        return {}, "厩舎の話を取得できませんでした（通信エラー）"
+        return {}, ("厩舎の話を取得できませんでした（通信エラー・リトライ済み）。"
+                    "分析結果には影響ありません。クラウド環境では"
+                    "keibabook側の制限で取得できない場合があります")
     # ログインしたはずなのに極端に少ない → Cookie失効の可能性 → 再ログイン1回
     if authed and len(danwa) <= 3:
         fresh = _kb_cookies(force=True)
