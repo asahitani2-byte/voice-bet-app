@@ -14,13 +14,20 @@ import streamlit as st
 
 from . import LOGIC_VERSION
 from .analyzer import rank_horses, select_candidate, summarize
+from .batch import (analyze_race, get_jra_schedule, get_nar_venues,
+                    nar_race_ids)
 from .config import data_dir, get_secret
+from .format import (adj_text as _adj_text, build_tsv as _build_tsv,
+                     dist_label as _dist_label, race_label as _race_label,
+                     result_to_rows, th_label as _th_label,
+                     time_full as _time_full)
 from .models import HorseAnalysisResult, RaceAnalysisResult
 from .keibabook import fetch_danwa
 from .nar import is_nar_race_id, select_candidate_nar
 from .netkeiba_client import BlockedError, NetkeibaClient, NetkeibaError
 from .parsers import seconds_to_time
 from .repository import Repository
+from .sheets import export_to_spreadsheet, setup_guide, sheets_configured
 
 logger = logging.getLogger("my_logic")
 
@@ -211,76 +218,9 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
 
 
 # ─── 結果の表示 ──────────────────────────────────────────────
-def _adj_text(s) -> str:
-    if s.adjustment_type != "adjusted_shorter" or s.adjusted_time_seconds is None:
-        return "なし"
-    return seconds_to_time(s.adjusted_time_seconds)
+# フォーマッタ群は format.py に共通化（スプレッドシート出力と共用）
 
 
-def _time_full(s) -> str:
-    """採用タイムのフル表記（例 "1:21.2-24.2、-16"）。
-
-    補正ありは補正後の先頭タイム＋元のラスト400m・独自数値、
-    補正なしは元タイム文字列をそのまま返す。
-    """
-    if s.adjustment_type == "adjusted_shorter" and s.adjusted_time_seconds is not None:
-        tail = (f"-{s.last_400_seconds}"
-                if s.last_400_seconds is not None else "")
-        custom = f"、{s.custom_value}" if s.custom_value else ""
-        return f"{seconds_to_time(s.adjusted_time_seconds)}{tail}{custom}"
-    return s.original_time_text
-
-
-def _dist_label(s, today_dist: int | None) -> str:
-    if s.distance_difference == 0:
-        return "同距離"
-    if s.distance_difference > 0:
-        return f"{s.distance_difference}m短いレースから補正"
-    return f"{-s.distance_difference}m長いレース・補正なし"
-
-
-def _race_label(s) -> str:
-    """採用レースの統合表記（例 "3歳未勝利（2026/04/05 阪神1R ダ1400m）"）。
-
-    括弧内はメモの日付行（source_date_text）をそのまま利用する。
-    旧履歴などで日付行が無い場合は競馬場＋馬場＋距離で代替。
-    """
-    name = s.source_race_name or s.source_race_id
-    detail = s.source_date_text.strip() if s.source_date_text else ""
-    if not detail:
-        detail = f"{s.source_venue}{s.source_track_type}{s.source_distance}m"
-    return f"{name}（{detail}）"
-
-
-def _th_label(s) -> str:
-    if s.target_horse_status == "ok" and s.target_horse_gap is not None:
-        return f"差{s.target_horse_gap:+.1f}秒（{s.target_horse_name}）"
-    if s.target_horse_status == "unknown":
-        return "判定不能"
-    return "-"
-
-
-def _build_tsv(result: RaceAnalysisResult) -> str:
-    header = ["順位", "馬番", "馬名", "採用タイム", "元タイム", "補正後タイム",
-              "採用レース", "採用距離", "距離差", "TargetHorse判定", "メモ"]
-    lines = ["\t".join(header)]
-    for h in result.horses:
-        s = h.selected
-        if s:
-            row = [str(h.rank), str(h.entry.umaban), h.entry.name,
-                   seconds_to_time(s.ranking_time_seconds),
-                   s.original_time_text,
-                   _adj_text(s),
-                   s.source_race_name or s.source_race_id,
-                   f"{s.source_track_type}{s.source_distance}m",
-                   _dist_label(s, result.race.distance),
-                   _th_label(s),
-                   (s.note_text or "").replace("\t", " ").replace("\n", " ")]
-        else:
-            row = ["－", str(h.entry.umaban), h.entry.name, "記録なし", "", "",
-                   "", "", "", "", h.no_record_reason or h.fetch_error or ""]
-        lines.append("\t".join(row))
-    return "\n".join(lines)
 
 
 def _render_result(result: RaceAnalysisResult) -> None:
@@ -331,7 +271,7 @@ def _render_result(result: RaceAnalysisResult) -> None:
                     f"（{s.source_date_text}）",
                     f"**採用距離**：{s.source_track_type}{s.source_distance}m",
                     f"**今回の距離**：{race.track_type}{race.distance}m",
-                    f"**距離区分**：{_dist_label(s, race.distance)}",
+                    f"**距離区分**：{_dist_label(s)}",
                 ]
                 if s.adjustment_type == "adjusted_shorter":
                     section = getattr(s, "section_meters", 400) or 400
@@ -493,3 +433,169 @@ def render_mylogic_section() -> None:
 
     with st.expander("🗂 分析履歴"):
         _render_history()
+
+    _render_batch_section()
+
+
+# ─── 開催日まるごと一括集計 → Googleスプレッドシート ─────────
+def _render_batch_section() -> None:
+    st.divider()
+    st.markdown("### 📅 開催日まるごと集計 → Googleスプレッドシート")
+    st.caption("開催日を選ぶと全レースをMyロジックで一括分析し、"
+               "新規スプレッドシートに競馬場ごとのタブで書き出します")
+
+    repo = Repository()
+    client = NetkeibaClient(repo)
+
+    # ── 中央ブロック ──
+    st.markdown("**中央競馬**（1日＝全場・全レース）")
+    try:
+        schedule = get_jra_schedule(client, repo)
+    except (NetkeibaError, BlockedError) as e:
+        st.caption(f"開催日を取得できませんでした: {e}")
+        schedule = []
+    if schedule:
+        cols = st.columns(min(max(len(schedule), 1), 4))
+        for i, day in enumerate(schedule):
+            n_races = sum(len(v) for v in day["venues"].values())
+            if cols[i % 4].button(f"{day['label']}\n{n_races}R",
+                                  key=f"batch_jra_{day['date']}",
+                                  use_container_width=True):
+                st.session_state["batch_sel"] = {
+                    "kind": "jra", "date": day["date"], "tab_prefix": day["label"],
+                    "label": f"中央 {day['label']}", "venues": day["venues"]}
+                st.rerun()
+    else:
+        st.caption("直近の中央開催が見つかりません")
+
+    # ── 地方ブロック ──
+    st.markdown("**地方競馬**（日付＋競馬場を選択）")
+    import datetime as _dt
+    nar_dates = [(_dt.date.today() + _dt.timedelta(days=i)) for i in range(3)]
+    _wd = ["月", "火", "水", "木", "金", "土", "日"]
+    date_labels = [f"{d.month}/{d.day}({_wd[d.weekday()]})" for d in nar_dates]
+    sel_idx = st.selectbox("開催日", range(len(nar_dates)),
+                           format_func=lambda i: date_labels[i],
+                           key="batch_nar_date")
+    nar_date = nar_dates[sel_idx].strftime("%Y%m%d")
+    try:
+        venues = get_nar_venues(client, repo, nar_date)
+    except (NetkeibaError, BlockedError) as e:
+        st.caption(f"開催場を取得できませんでした: {e}")
+        venues = []
+    if venues:
+        cols = st.columns(min(max(len(venues), 1), 4))
+        for i, (code, name) in enumerate(venues):
+            if cols[i % 4].button(name, key=f"batch_nar_{nar_date}_{code}",
+                                  use_container_width=True):
+                st.session_state["batch_sel"] = {
+                    "kind": "nar", "date": nar_date,
+                    "tab_prefix": date_labels[sel_idx],
+                    "label": f"{date_labels[sel_idx]} {name}",
+                    "venues": {name: nar_race_ids(nar_date, code)}}
+                st.rerun()
+    else:
+        st.caption("この日の地方開催が見つかりません")
+
+    # ── 選択後の確認・実行 ──
+    sel = st.session_state.get("batch_sel")
+    if not sel:
+        return
+    total = sum(len(v) for v in sel["venues"].values())
+    st.info(f"**対象: {sel['label']}** — {len(sel['venues'])}場 最大{total}レース\n\n"
+            "初回は1レースあたり1〜2分かかります（分析済みキャッシュがあれば高速）。"
+            "実行中はこのタブを閉じないでください。")
+    ok, missing = sheets_configured()
+    if not ok:
+        st.error(f"Googleスプレッドシート連携が未設定です（{missing}）。"
+                 "下の手順で設定してから実行してください。")
+        with st.expander("📗 初回設定の手順", expanded=True):
+            st.markdown(setup_guide())
+    c1, c2 = st.columns(2)
+    run = c1.button("🚀 集計開始", type="primary", disabled=not ok,
+                    use_container_width=True, key="batch_run")
+    if c2.button("キャンセル", use_container_width=True, key="batch_cancel"):
+        st.session_state.pop("batch_sel", None)
+        st.rerun()
+    if run:
+        _run_batch(sel)
+
+
+def _run_batch(sel: dict) -> None:
+    import datetime as _dt
+
+    repo = Repository()
+    client = NetkeibaClient(repo)
+    status_box = st.status(f"{sel['label']} を一括集計中...", expanded=True)
+    bar = status_box.progress(0.0)
+    msg = status_box.empty()
+
+    msg.write("netkeibaのログイン状態を確認中...")
+    if not client.ensure_login():
+        status_box.update(label="netkeibaログイン失敗", state="error")
+        st.error("netkeibaへログインできませんでした。単発の分析を一度実行して"
+                 "ログイン状態を確認してください。")
+        return
+
+    total = sum(len(v) for v in sel["venues"].values())
+    done = 0
+    venue_blocks: dict[str, list[list[str]]] = {}
+    errors: list[str] = []
+    ok_races = 0
+    aborted = False
+    for venue, rids in sel["venues"].items():
+        rows_all: list[list[str]] = []
+        for rid in rids:
+            done += 1
+            rno = int(rid[10:12])
+            msg.write(f"{venue}{rno}R を分析中（{done}/{total}）")
+            bar.progress(done / max(total, 1))
+            try:
+                result = analyze_race(repo, client, rid,
+                                      with_danwa=(sel["kind"] == "jra"))
+                rows_all.extend(result_to_rows(result))
+                rows_all.append([""])
+                ok_races += 1
+            except BlockedError as e:
+                errors.append(f"{venue}{rno}R以降: アクセス制限を検知して中断（{e}）")
+                aborted = True
+                break
+            except NetkeibaError as e:
+                # NARの規則生成race_idは存在しないRを含むため静かにスキップ
+                if sel["kind"] == "nar" and "出走馬" in str(e):
+                    continue
+                errors.append(f"{venue}{rno}R: {e}")
+        if rows_all:
+            venue_blocks[venue] = rows_all
+        if aborted:
+            break
+
+    if not venue_blocks:
+        status_box.update(label="集計失敗", state="error")
+        st.error("集計できたレースがありませんでした")
+        for e in errors[:10]:
+            st.caption(f"・{e}")
+        return
+
+    msg.write("Googleスプレッドシートへ書き込み中...")
+    tab_prefix = sel.get("tab_prefix") or sel["label"]
+    try:
+        url = export_to_spreadsheet(tab_prefix, venue_blocks)
+    except Exception as e:
+        logger.exception("スプレッドシート出力失敗")
+        status_box.update(label="スプレッドシート出力失敗", state="error")
+        st.error(f"スプレッドシートへの書き込みに失敗しました: {type(e).__name__}")
+        with st.expander("📗 設定手順の確認"):
+            st.markdown(setup_guide())
+        return
+
+    status_box.update(
+        label=f"集計完了 — {ok_races}レースを書き出しました", state="complete",
+        expanded=False)
+    tabs = "、".join(f"{tab_prefix} {v}" for v in venue_blocks)
+    st.success(f"✅ 書き込み完了（タブ: {tabs}）　[スプレッドシートを開く]({url})")
+    if errors:
+        with st.expander(f"⚠️ 取得できなかったレース（{len(errors)}件）"):
+            for e in errors:
+                st.caption(f"・{e}")
+    st.session_state.pop("batch_sel", None)

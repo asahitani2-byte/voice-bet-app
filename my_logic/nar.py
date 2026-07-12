@@ -18,8 +18,7 @@ from .models import HorseAnalysisResult, HorseEntry, HorseRaceNote
 logger = logging.getLogger("my_logic")
 
 NAR_SECTION_METERS = 600   # 上り3ハロン
-PRIMARY_RUNS = 10          # まず直近10走
-EXTEND_DAYS = 365          # フォールバックは1年以内
+RANGE_DAYS = 365           # 分析当日を起点とした過去1年以内を候補にする
 
 
 def is_nar_race_id(race_id: str) -> bool:
@@ -39,35 +38,25 @@ def select_candidate_nar(entry: HorseEntry, notes_all: list[HorseRaceNote],
                          today_distance: int, today_track: str,
                          today: datetime.date | None = None
                          ) -> HorseAnalysisResult:
-    """NARの候補選定（直近10走 → 1年以内フォールバック）。
+    """NARの候補選定。
 
-    notes_all は新しい順（戦績表の表示順）である前提。
+    分析当日を起点とした過去1年以内（RANGE_DAYS）の全レースを候補にする。
+    日付は戦績表のrace_info（例「26/06/27 高知 6R」= 2026-06-27）から取得。
+    日付が読めない行は1年以内と確認できないため対象外。
     """
     today = today or datetime.date.today()
-    primary = notes_all[:PRIMARY_RUNS]
+    cutoff = today - datetime.timedelta(days=RANGE_DAYS)
+    in_range = [n for n in notes_all if n.date and n.date >= cutoff]
     res = select_candidate(
-        entry, primary, today_distance, _no_result_fetcher,
+        entry, in_range, today_distance, _no_result_fetcher,
         today_track=today_track, section_meters=NAR_SECTION_METERS,
         use_note_gap=True)
-    if res.selected:
-        return res
-
-    # 直近10走で採用なし → 1年以内の全レースへ拡大（追加分がある場合のみ）
-    cutoff = today - datetime.timedelta(days=EXTEND_DAYS)
-    extended = [n for n in notes_all if n.date and n.date >= cutoff]
-    primary_ids = {n.source_race_id for n in primary}
-    if {n.source_race_id for n in extended} - primary_ids:
-        res2 = select_candidate(
-            entry, extended, today_distance, _no_result_fetcher,
-            today_track=today_track, section_meters=NAR_SECTION_METERS,
-            use_note_gap=True)
-        if res2.selected:
-            res2.fetch_warnings.append(
-                "直近10走に有効候補がないため直近1年まで対象を拡大")
-            return res2
-        res = res2
-    if not res.selected and not res.no_record_reason:
-        res.no_record_reason = "1年以内に対象レースなし"
-    elif res.no_record_reason == "レース別馬メモなし":
-        res.no_record_reason = "出走履歴なし（初出走）"
+    if not res.selected:
+        if not notes_all:
+            res.no_record_reason = "出走履歴なし（初出走）"
+        elif not in_range:
+            res.no_record_reason = "1年以内に出走なし"
+        elif res.no_record_reason == "レース別馬メモなし":
+            res.no_record_reason = "1年以内に対象レースなし"
+    res.notes_count = len(notes_all)
     return res

@@ -99,6 +99,58 @@ class TestParseHorseDbResults:
         assert parse_horse_db_results("<html></html>") == []
 
 
+PC_RESULTS_HTML = """
+<table>
+<tr><th>日付</th><th>開催</th><th>天気</th><th>R</th><th>レース名</th>
+<th>頭数</th><th>枠番</th><th>馬番</th><th>オッズ</th><th>人気</th>
+<th>着順</th><th>騎手</th><th>斤量</th><th>距離</th><th>馬場</th>
+<th>馬場指数</th><th>タイム</th><th>着差</th><th>通過</th><th>ペース</th>
+<th>上り</th><th>馬体重</th><th>勝ち馬(2着馬)</th><th>賞金</th></tr>
+<tr>
+<td>2026/06/27</td><td>高知</td><td>曇</td><td>6</td>
+<td><a href="https://db.netkeiba.com/race/202654062706/">Ｃ１ー５</a></td>
+<td>10</td><td>5</td><td>5</td><td>156.6</td><td>9</td>
+<td>8</td><td>阿部基嗣</td><td>55</td><td>ダ1600</td><td>不</td>
+<td>-19</td><td>1:46.4</td><td>2.6</td><td>10-10-10-10</td><td></td>
+<td>38.8</td><td>464(-6)</td><td>ウィズユアドリーム</td><td></td>
+</tr>
+<tr>
+<td>2025/11/03</td><td>4小倉8</td><td>晴</td><td>12</td>
+<td><a href="https://db.netkeiba.com/race/202610040812/">中央戦</a></td>
+<td>16</td><td>1</td><td>2</td><td>50.0</td><td>10</td>
+<td>12</td><td>某騎手</td><td>56</td><td>芝1200</td><td>良</td>
+<td></td><td>1:09.5</td><td>1.2</td><td>3-3</td><td></td>
+<td>35.0</td><td>460(0)</td><td>チュウオウウマ</td><td></td>
+</tr>
+</table>
+"""
+
+
+class TestParsePcLayout:
+    """PC版（db.netkeiba.com/horse/result/）の全成績テーブル。"""
+
+    def test_pc_layout_fields(self):
+        notes = parse_horse_db_results(PC_RESULTS_HTML)
+        assert len(notes) == 2
+        n = notes[0]
+        assert n.date == datetime.date(2026, 6, 27)
+        assert n.venue == "高知"
+        assert n.race_no == 6
+        assert n.source_race_id == "202654062706"
+        assert n.distance == 1600
+        assert n.parsed_time.text == "1:07.6-38.8、-19"
+        assert n.gap_to_target == 2.6
+        assert n.target_name == "ウィズユアドリーム"
+
+    def test_pc_layout_central_venue(self):
+        """中央戦の行（開催「4小倉8」）も場名を抽出して扱える。"""
+        n = parse_horse_db_results(PC_RESULTS_HTML)[1]
+        assert n.venue == "小倉"
+        assert n.track_type == "芝"
+        assert n.distance == 1200
+        assert n.parsed_time.custom_value is None  # 馬場指数空欄でも有効
+
+
 def nar_note(race_id, distance, head, agari, gap=0.1, days_ago=30,
              track="ダート", shisu="-10"):
     n = HorseRaceNote(
@@ -150,8 +202,8 @@ class TestNarSelection:
         assert res.selected is not None
         assert res.selected.target_horse_status == "unknown"
 
-    def test_extend_to_one_year_when_primary_no_hit(self):
-        """直近10走が全滅 → 1年以内の11走目以降から採用。"""
+    def test_range_is_one_year_not_ten_runs(self):
+        """候補は「過去1年以内の全レース」— 11走目以降でも1年以内なら対象。"""
         notes = [nar_note(f"NG{i}", 1600, 67.0 + i * 0.1, 38.8, gap=1.0,
                           days_ago=10 + i) for i in range(10)]
         notes.append(nar_note("OLD_OK", 1600, 68.0, 38.8, gap=0.1,
@@ -159,18 +211,37 @@ class TestNarSelection:
         res = select_candidate_nar(entry(), notes, 1600, "ダート")
         assert res.selected is not None
         assert res.selected.source_race_id == "OLD_OK"
-        assert any("1年" in w for w in res.fetch_warnings)
+
+    def test_faster_race_beyond_ten_runs_wins(self):
+        """11走目以降にある最速レースが、直近10走内の候補より優先される。"""
+        notes = [nar_note(f"SLOW{i}", 1600, 68.0, 38.8, gap=0.1,
+                          days_ago=10 + i) for i in range(10)]
+        notes.append(nar_note("FAST_11TH", 1600, 66.0, 38.8, gap=0.1,
+                              days_ago=300))
+        res = select_candidate_nar(entry(), notes, 1600, "ダート")
+        assert res.selected.source_race_id == "FAST_11TH"
 
     def test_over_one_year_not_used(self):
-        """11走目以降でも1年より古いレースは対象外。"""
-        notes = [nar_note(f"NG{i}", 1600, 67.0, 38.8, gap=1.0,
-                          days_ago=10 + i) for i in range(10)]
-        notes.append(nar_note("TOO_OLD", 1600, 68.0, 38.8, gap=0.1,
-                              days_ago=400))
+        """1年（365日）より古いレースは速くても対象外。"""
+        notes = [nar_note("RECENT", 1600, 68.0, 38.8, gap=0.1, days_ago=30),
+                 nar_note("TOO_OLD", 1600, 66.0, 38.8, gap=0.1, days_ago=400)]
         res = select_candidate_nar(entry(), notes, 1600, "ダート")
+        assert res.selected.source_race_id == "RECENT"
+
+    def test_all_over_one_year_is_no_record(self):
+        notes = [nar_note("OLD", 1600, 66.0, 38.8, gap=0.1, days_ago=400)]
+        res = select_candidate_nar(entry(), notes, 1600, "ダート")
+        assert res.selected is None
+        assert res.no_record_reason == "1年以内に出走なし"
+
+    def test_undated_row_excluded(self):
+        """日付が読めない行は1年以内と確認できないため対象外。"""
+        n = nar_note("NODATE", 1600, 66.0, 38.8, gap=0.1)
+        n.date = None
+        res = select_candidate_nar(entry(), [n], 1600, "ダート")
         assert res.selected is None
 
     def test_no_history(self):
         res = select_candidate_nar(entry(), [], 1600, "ダート")
         assert res.selected is None
-        assert "初出走" in res.no_record_reason or "なし" in res.no_record_reason
+        assert res.no_record_reason == "出走履歴なし（初出走）"

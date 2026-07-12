@@ -394,14 +394,22 @@ class NetkeibaClient:
         全成績ページ（/horse/result/）を優先し、取れなければ
         馬ページ本体（直近走のみ掲載）へフォールバック。
         """
-        key = f"dbresult:{horse_id}"
+        key = f"dbresult2:{horse_id}"  # v2: PC版全成績を優先する形式
         html = None if self.force_refresh else self.repo.cache_get(
             key, TTL_NOTES)
         if html is None:
-            urls = [f"https://db.sp.netkeiba.com/horse/result/{horse_id}/",
-                    f"https://db.sp.netkeiba.com/horse/{horse_id}/"]
-            for url in urls:
-                r = self._request("GET", url)
+            # PC版の全成績ページは全出走が1テーブルに揃う（要PC UA）。
+            # 取れない場合はSP版馬ページ（直近10走のみ）にフォールバック
+            candidates_urls = [
+                (f"https://db.netkeiba.com/horse/result/{horse_id}/", True),
+                (f"https://db.sp.netkeiba.com/horse/{horse_id}/", False),
+            ]
+            for url, pc in candidates_urls:
+                r = self._request(
+                    "GET", url,
+                    headers={"User-Agent": UA_PC} if pc else None)
+                if pc:
+                    r.encoding = r.apparent_encoding
                 if r.status_code == 200 and parse_horse_db_results(r.text):
                     html = r.text
                     break

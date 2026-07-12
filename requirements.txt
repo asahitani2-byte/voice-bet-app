@@ -12,3 +12,4 @@ pandas
 # 開発・テスト用
 pytest
 
+gspread

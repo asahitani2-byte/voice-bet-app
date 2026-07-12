@@ -307,32 +307,56 @@ def parse_horse_db_results(html: str) -> list[HorseRaceNote]:
                     return row_tds[idx].get_text(" ", strip=True)
         return ""
 
+    # レイアウト判定: PC版は日付/開催/R/レース名が別列、
+    # SP版は1列目に「26/06/27 高知 6R レース名」がまとまっている
+    pc_layout = any(k.startswith("日付") for k in header_map)
+
     notes: list[HorseRaceNote] = []
     for tr in table.select("tr")[1:]:
         tds = tr.find_all("td")
         if len(tds) < 10:
             continue
         note = HorseRaceNote(source_race_id="")
-        # 1列目: 日付 開催 R レース名
-        head_text = _normalize(tds[0].get_text(" ", strip=True))
-        m = _DB_ROW_HEAD_RE.match(head_text)
-        if m:
-            yy, mo, dd, venue, rno, rname = m.groups()
-            try:
-                note.date = datetime.date(2000 + int(yy), int(mo), int(dd))
-            except ValueError:
-                note.date = None
-            note.venue = venue
-            note.race_no = int(rno)
-            note.race_name = rname.strip() or head_text
-            note.date_text = (f"20{yy}/{mo}/{dd} {venue}{int(rno)}R")
+        if pc_layout:
+            date_text = _normalize(col(tds, "日付"))
+            dm2 = re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", date_text)
+            if dm2:
+                try:
+                    note.date = datetime.date(*map(int, dm2.groups()))
+                except ValueError:
+                    note.date = None
+            note.venue = col(tds, "開催")
+            # 開催が「4小倉8」形式（中央）の場合は場名のみに
+            vm = re.search(r"[一-龠ぁ-んァ-ヶ]+", note.venue)
+            note.venue = vm.group(0) if vm else note.venue
+            rno_text = _normalize(col(tds, "R"))
+            note.race_no = int(rno_text) if rno_text.isdigit() else None
+            note.race_name = col(tds, "レース名")
+            note.date_text = (f"{date_text} {note.venue}"
+                              f"{note.race_no or ''}R")
         else:
-            note.race_name = head_text[:30]
-        link = tr.select_one("a[href*='/race/']")
-        if link:
+            # 1列目: 日付 開催 R レース名
+            head_text = _normalize(tds[0].get_text(" ", strip=True))
+            m = _DB_ROW_HEAD_RE.match(head_text)
+            if m:
+                yy, mo, dd, venue, rno, rname = m.groups()
+                try:
+                    note.date = datetime.date(2000 + int(yy), int(mo), int(dd))
+                except ValueError:
+                    note.date = None
+                note.venue = venue
+                note.race_no = int(rno)
+                note.race_name = rname.strip() or head_text
+                note.date_text = (f"20{yy}/{mo}/{dd} {venue}{int(rno)}R")
+            else:
+                note.race_name = head_text[:30]
+        # PC版は日付列に /race/list/ リンクがあるため、
+        # 行内の全リンクから12桁のrace_idを持つものを探す
+        for link in tr.select("a[href*='/race/']"):
             rm = re.search(r"/race/(\d{12})", link.get("href") or "")
             if rm:
                 note.source_race_id = rm.group(1)
+                break
         if not note.source_race_id:
             continue
         # 距離・馬場
