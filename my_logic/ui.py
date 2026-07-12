@@ -95,16 +95,28 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
         f"{race.name}（{track}{race.distance}m / race_id: {race_id}）")
     msg.write(f"分析対象: **{race.name}** 距離: **{track}{race.distance}m**")
 
-    msg.write("netkeibaのログイン状態を確認中...")
+    msg.write("netkeibaのログイン状態を確認中...（クラウド初回は数分かかります）")
     if not client.ensure_login():
         status_box.update(label="netkeibaログイン失敗", state="error")
-        st.error(
-            "netkeibaへログインできませんでした（セッション切れの可能性）。\n\n"
-            "次のいずれかで再ログインしてください：\n"
-            "1. サイドバーの「🔐 netkeiba ログイン設定」からブラウザで再ログイン"
-            "（完了後にもう一度分析を実行）\n"
-            "2. `.env` に NETKEIBA_LOGIN_ID / NETKEIBA_PASSWORD を設定"
-            "（自動で再ログインするようになります）")
+        has_creds = bool(
+            (get_secret("NETKEIBA_LOGIN_ID") or get_secret("NETKEIBA_USER"))
+            and (get_secret("NETKEIBA_PASSWORD") or get_secret("NETKEIBA_PASS")))
+        if not has_creds:
+            st.error(
+                "netkeibaのログイン情報が見つかりません。\n\n"
+                "- ローカル: `.env` に NETKEIBA_LOGIN_ID / NETKEIBA_PASSWORD を設定\n"
+                "- クラウド(Streamlit Cloud): アプリの Settings → Secrets に "
+                "NETKEIBA_LOGIN_ID / NETKEIBA_PASSWORD を設定\n"
+                "（ローカルはサイドバーの「🔐 netkeiba ログイン設定」でも可）")
+        else:
+            st.error(
+                "netkeibaのログイン情報は設定されていますが、ログインに失敗しました。\n\n"
+                "考えられる原因：\n"
+                "1. IDまたはパスワードの誤り（値を再確認してください）\n"
+                "2. クラウド環境の場合：ブラウザ(Chromium)の準備失敗、または "
+                "netkeibaがクラウドIPからのアクセスを制限している可能性\n\n"
+                "詳細はログ（クラウドは Manage app → Logs、ローカルは "
+                "data/mylogic.log）の直近のエラー行を確認してください。")
         return None
 
     targets = [e for e in race.entries if not e.is_cancelled]

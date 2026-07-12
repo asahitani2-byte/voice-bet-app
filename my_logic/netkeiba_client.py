@@ -171,9 +171,12 @@ def _login_with_credentials_impl(login_id: str, password: str,
         # クラウド環境でchromium未導入の場合は一度だけ導入して再試行
         from .config import try_install_playwright_chromium
         if retry_ok and try_install_playwright_chromium(str(e)):
+            logger.info("Chromiumを導入してログインを再試行")
             return _login_with_credentials_impl(login_id, password,
                                                 retry_ok=False)
-        logger.error("Playwrightログイン失敗: %s", type(e).__name__)
+        # 原因調査用に例外の要点を残す（認証情報は含めない）
+        logger.error("Playwrightログイン失敗: %s: %s",
+                     type(e).__name__, str(e)[:200])
         return {}
 
 
