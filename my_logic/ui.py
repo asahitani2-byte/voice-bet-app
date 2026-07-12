@@ -17,6 +17,7 @@ from .analyzer import rank_horses, select_candidate, summarize
 from .config import data_dir, get_secret
 from .models import HorseAnalysisResult, RaceAnalysisResult
 from .keibabook import fetch_danwa
+from .nar import is_nar_race_id, select_candidate_nar
 from .netkeiba_client import BlockedError, NetkeibaClient, NetkeibaError
 from .parsers import seconds_to_time
 from .repository import Repository
@@ -97,9 +98,10 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
     progress = status_box.progress(0.0)
     msg = status_box.empty()
 
+    nar = is_nar_race_id(race_id)
     try:
         msg.write("レース情報を取得中...")
-        race = client.get_shutuba(race_id)
+        race = client.get_shutuba(race_id, nar=nar)
     except BlockedError as e:
         status_box.update(label="アクセス制限を検知", state="error")
         st.error(str(e))
@@ -147,14 +149,21 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
 
     n = len(targets)
     for i, entry in enumerate(targets):
-        msg.write(f"{i + 1} / {n}頭を分析中 — {entry.name} のメモを取得しています")
+        src = "戦績" if nar else "メモ"
+        msg.write(f"{i + 1} / {n}頭を分析中 — {entry.name} の{src}を取得しています")
         progress.progress((i + 1) / max(n, 1))
         try:
-            notes, warns = client.get_horse_notes(entry.horse_id)
-            res = select_candidate(entry, notes, race.distance,
-                                   client.get_race_result,
-                                   today_track=race.track_type)
-            res.fetch_warnings.extend(warns)
+            if nar:
+                # 地方: 戦績表から採用タイムを合成（タイム−上り3F、着差でTH判定）
+                notes_all = client.get_horse_db_results(entry.horse_id)
+                res = select_candidate_nar(entry, notes_all, race.distance,
+                                           race.track_type)
+            else:
+                notes, warns = client.get_horse_notes(entry.horse_id)
+                res = select_candidate(entry, notes, race.distance,
+                                       client.get_race_result,
+                                       today_track=race.track_type)
+                res.fetch_warnings.extend(warns)
         except BlockedError as e2:
             # ブロック検知: 以降の取得を中止し、取得済み分のみで継続
             st.warning(str(e2))
@@ -180,12 +189,14 @@ def _run_analysis(race_id: str, use_cache: bool) -> RaceAnalysisResult | None:
     out = summarize(race, ranked)
     out.warnings = global_warnings
 
-    # 厩舎の話（競馬ブック）— 補助情報のため失敗しても分析は継続
-    msg.write("厩舎の話（競馬ブック）を取得中...")
-    danwa, danwa_warn = fetch_danwa(race_id, repo, force_refresh=not use_cache)
-    out.danwa = danwa
-    if danwa_warn:
-        out.warnings.append(danwa_warn)
+    # 厩舎の話（競馬ブック）— 中央のみ。補助情報のため失敗しても分析は継続
+    if not nar:
+        msg.write("厩舎の話（競馬ブック）を取得中...")
+        danwa, danwa_warn = fetch_danwa(race_id, repo,
+                                        force_refresh=not use_cache)
+        out.danwa = danwa
+        if danwa_warn:
+            out.warnings.append(danwa_warn)
 
     run_id = repo.save_analysis(out)
     if run_id is None:
@@ -323,9 +334,10 @@ def _render_result(result: RaceAnalysisResult) -> None:
                     f"**距離区分**：{_dist_label(s, race.distance)}",
                 ]
                 if s.adjustment_type == "adjusted_shorter":
+                    section = getattr(s, "section_meters", 400) or 400
                     lines.append(
                         f"**補正式**：{s.original_time_text.split('-')[0]} + "
-                        f"{s.last_400_seconds} × {s.distance_difference} ÷ 400 "
+                        f"{s.last_400_seconds} × {s.distance_difference} ÷ {section} "
                         f"= +{s.adjustment_seconds:.1f}秒")
                 if s.target_horse_status == "ok":
                     lines.append(
@@ -419,16 +431,15 @@ def render_mylogic_section() -> None:
     """Myロジック分析セクション全体（voice_bet_app.py末尾から呼ばれる）。"""
     st.divider()
     st.markdown("### 🧮 Myロジックで分析")
-    st.caption("netkeibaの馬メモに記録した独自タイムで出走馬をランキングします"
-               f"（ロジック v{LOGIC_VERSION}）")
+    st.caption("中央＝netkeibaの馬メモの独自タイム、地方＝戦績表（タイム−上り3F、"
+               f"馬場指数）で出走馬をランキングします（ロジック v{LOGIC_VERSION}）")
 
     current_rid = st.session_state.get("race_id", "")
     current_label = st.session_state.get("race_label", "")
-    is_local = st.session_state.get("is_local", False)
 
     # 対象race_idの決定: 直接入力とレース認識の新しい方を優先
     manual = st.text_input(
-        "race_id直接入力（過去レースも分析可）",
+        "race_id直接入力（過去レース・地方も分析可）",
         placeholder="例：202603020611（12桁）", key="mylogic_manual_rid")
     manual_clean = (manual or "").strip()
 
@@ -440,15 +451,13 @@ def render_mylogic_section() -> None:
             target_desc = f"直接入力: {manual_clean}"
         else:
             st.error("race_idは12桁の数字で入力してください（例: 202603020611）")
-    elif current_rid and not is_local and re.fullmatch(r"\d{12}", str(current_rid)):
+    elif current_rid and re.fullmatch(r"\d{12}", str(current_rid)):
         target_rid = str(current_rid)
         target_desc = f"認識中のレース: {current_label}"
-    elif current_rid and is_local:
-        st.info("Myロジック分析は中央競馬（netkeiba）のみ対応です。"
-                "race_idを直接入力するか、中央のレースを選択してください。")
 
     if target_rid:
-        st.markdown(f"**分析対象race_id：`{target_rid}`**（{target_desc}）")
+        kind = "地方" if is_nar_race_id(target_rid) else "中央"
+        st.markdown(f"**分析対象race_id：`{target_rid}`**（{target_desc}／{kind}）")
 
     c1, c2 = st.columns(2)
     run_clicked = c1.button("🧮 分析を実行", type="primary",

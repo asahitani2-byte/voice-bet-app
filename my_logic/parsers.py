@@ -268,6 +268,122 @@ def parse_note_paging(html: str) -> tuple[int | None, bool | None]:
             bool(int(last)) if last is not None and str(last).isdigit() else None)
 
 
+# ─── 出走馬DBページの戦績表解析（地方Myロジック用）──────────
+_DB_ROW_HEAD_RE = re.compile(
+    r"(\d{2})/(\d{2})/(\d{2})\s*(\S+?)\s*(\d{1,2})\s*R\s*(.*)")
+_DB_DIST_RE = re.compile(r"(芝|ダ|障)\s*(\d{3,4})")
+
+
+def parse_horse_db_results(html: str) -> list[HorseRaceNote]:
+    """db.sp.netkeiba.com の馬ページ戦績表を解析しメモ相当データを合成する。
+
+    採用タイム = 走破タイム − 上り3F を先頭タイムとし、
+    「{先頭}-{上り}、{馬場指数}」形式（馬場指数なしなら「{先頭}-{上り}」）。
+    着差列（勝ち馬との秒差）と勝ち馬(2着馬)列をTargetHorse判定用に保持。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    # 「タイム」「上り」列を持つ戦績テーブルを特定
+    table = None
+    header_map: dict[str, int] = {}
+    for t in soup.select("table"):
+        head_tr = t.select_one("tr")
+        if not head_tr:
+            continue
+        cells = [re.sub(r"\s", "", c.get_text(" ", strip=True))
+                 for c in head_tr.find_all(["th", "td"])]
+        if any("タイム" in c for c in cells) and any(c.startswith("上り")
+                                                   for c in cells):
+            table = t
+            for i, c in enumerate(cells):
+                header_map[c] = i
+            break
+    if table is None:
+        return []
+
+    def col(row_tds, *names) -> str:
+        for name in names:
+            for key, idx in header_map.items():
+                if key.startswith(name) and idx < len(row_tds):
+                    return row_tds[idx].get_text(" ", strip=True)
+        return ""
+
+    notes: list[HorseRaceNote] = []
+    for tr in table.select("tr")[1:]:
+        tds = tr.find_all("td")
+        if len(tds) < 10:
+            continue
+        note = HorseRaceNote(source_race_id="")
+        # 1列目: 日付 開催 R レース名
+        head_text = _normalize(tds[0].get_text(" ", strip=True))
+        m = _DB_ROW_HEAD_RE.match(head_text)
+        if m:
+            yy, mo, dd, venue, rno, rname = m.groups()
+            try:
+                note.date = datetime.date(2000 + int(yy), int(mo), int(dd))
+            except ValueError:
+                note.date = None
+            note.venue = venue
+            note.race_no = int(rno)
+            note.race_name = rname.strip() or head_text
+            note.date_text = (f"20{yy}/{mo}/{dd} {venue}{int(rno)}R")
+        else:
+            note.race_name = head_text[:30]
+        link = tr.select_one("a[href*='/race/']")
+        if link:
+            rm = re.search(r"/race/(\d{12})", link.get("href") or "")
+            if rm:
+                note.source_race_id = rm.group(1)
+        if not note.source_race_id:
+            continue
+        # 距離・馬場
+        dm = _DB_DIST_RE.search(_normalize(col(tds, "距離")))
+        if dm:
+            note.track_type = _TRACK_MAP.get(dm.group(1), "")
+            note.distance = int(dm.group(2))
+            note.date_text += f" {dm.group(1)}{dm.group(2)}m"
+        # 着順
+        note.rank_text = col(tds, "着順")
+        rm2 = re.match(r"(\d+)", _normalize(note.rank_text))
+        note.rank = int(rm2.group(1)) if rm2 else None
+        # タイム・上り → 採用タイムを合成
+        time_text = _normalize(col(tds, "タイム"))
+        agari_text = _normalize(col(tds, "上り"))
+        shisu_text = _normalize(col(tds, "馬場指数"))
+        if re.match(r"^\d{1,2}:\d{2}\.\d$", time_text) and \
+                re.match(r"^\d{2}\.\d$", agari_text):
+            total = time_to_seconds(time_text)
+            agari = float(agari_text)
+            head = round1(total - agari)
+            custom = shisu_text if re.match(r"^[+-]?\d+(\.\d+)?$",
+                                            shisu_text) else None
+            text = f"{seconds_to_time(head)}-{agari_text}" + (
+                f"、{custom}" if custom else "")
+            note.parsed_time = ParsedTime(
+                text=text, head_text=seconds_to_time(head),
+                head_seconds=head, last400_seconds=agari,
+                custom_value=custom)
+        # TargetHorse情報（着差=勝ち馬との秒差、勝ち馬(2着馬)列）
+        note.target_name = col(tds, "勝ち馬")
+        gap_text = _normalize(col(tds, "着差"))
+        gm = re.match(r"^([+-]?\d+(?:\.\d+)?)$", gap_text)
+        if gm:
+            gap = float(gm.group(1))
+            # 自身が勝ち馬の場合、着差は2着馬との差 → 常に条件クリア側の0以下へ
+            note.gap_to_target = min(gap, 0.0) if note.rank == 1 else gap
+        elif note.rank == 1:
+            note.gap_to_target = 0.0  # 勝ち馬は無条件で有効
+        # 表示用コメント（メモ全文相当）
+        parts = [f"{note.date_text}", f"{note.race_name}",
+                 f"{note.rank_text}着" if note.rank_text else "",
+                 f"タイム{time_text}" if time_text else "",
+                 f"上り{agari_text}" if agari_text else "",
+                 f"馬場指数{shisu_text}" if shisu_text else "馬場指数なし",
+                 f"勝ち馬(2着馬):{note.target_name}" if note.target_name else ""]
+        note.comment = "　".join(p for p in parts if p)
+        notes.append(note)
+    return notes
+
+
 # ─── 公式レース結果（db.netkeiba.com）の解析 ────────────────
 def parse_db_result_html(html: str) -> list[ResultRow]:
     """db.netkeiba.com/race/{race_id}/ の結果テーブルを解析する。

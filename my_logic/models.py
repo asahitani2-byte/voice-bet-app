@@ -31,6 +31,9 @@ class HorseRaceNote:
     comment: str = ""
     parsed_time: ParsedTime | None = None
     source_url: str = ""
+    # NAR（戦績表ベース）用: 着差列から得た勝ち馬とのタイム差と勝ち馬名
+    gap_to_target: float | None = None
+    target_name: str = ""
 
 
 @dataclass
@@ -93,6 +96,10 @@ class CandidateRecord:
     target_horse_status: str = "unchecked"  # ok / rejected / unknown / unchecked
     is_selected: bool = False
     rejection_reason: str = ""
+    section_meters: int = 400          # 末尾区間の距離（中央=ラスト400m、地方=上り3F 600m）
+    # NAR用: 戦績表の着差列から事前計算済みのTargetHorse情報
+    precomputed_gap: float | None = None
+    precomputed_target: str = ""
 
 
 @dataclass

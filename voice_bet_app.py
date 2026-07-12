@@ -2219,16 +2219,16 @@ if recognized:
                         st.session_state.recognized = ""
                         st.rerun()
                 # スマホ幅で窮屈にならないよう、Myロジックは全幅ボタンで下段に配置
-                if not info["is_local"]:
-                    if st.button("🧮 Myロジックで分析", use_container_width=True,
-                                 key="btn_mylogic_from_race"):
-                        st.session_state.race_url   = info["url"]
-                        st.session_state.race_label = info["label"]
-                        st.session_state.race_id    = info["race_id"]
-                        st.session_state.is_local   = info["is_local"]
-                        st.session_state.recognized = ""
-                        st.session_state.mylogic_autorun = True
-                        st.rerun()
+                # （中央=馬メモ、地方=戦績表ベースで両対応）
+                if st.button("🧮 Myロジックで分析", use_container_width=True,
+                             key="btn_mylogic_from_race"):
+                    st.session_state.race_url   = info["url"]
+                    st.session_state.race_label = info["label"]
+                    st.session_state.race_id    = info["race_id"]
+                    st.session_state.is_local   = info["is_local"]
+                    st.session_state.recognized = ""
+                    st.session_state.mylogic_autorun = True
+                    st.rerun()
             else:
                 st.error(f"「{info['label']}」が見つかりません。"
                          f"（中央開催：{'、'.join(venues_today) if venues_today else 'なし'}）")

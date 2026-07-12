@@ -22,7 +22,8 @@ import requests
 
 from .config import cookie_store_path, get_secret
 from .models import HorseRaceNote, RaceInfo, ResultRow
-from .parsers import parse_db_result_html, parse_note_fragment, parse_shutuba_html
+from .parsers import (parse_db_result_html, parse_horse_db_results,
+                      parse_note_fragment, parse_shutuba_html)
 from .repository import Repository
 
 logger = logging.getLogger("my_logic")
@@ -312,12 +313,13 @@ class NetkeibaClient:
         return False
 
     # --- 高レベル ---
-    def get_shutuba(self, race_id: str) -> RaceInfo:
-        """出馬表（ログイン不要）。"""
+    def get_shutuba(self, race_id: str, nar: bool = False) -> RaceInfo:
+        """出馬表（ログイン不要）。narはnar.sp.netkeiba.comから取得。"""
         key = f"shutuba:{race_id}"
         html = None if self.force_refresh else self.repo.cache_get(key, TTL_SHUTUBA)
         if html is None:
-            url = f"https://race.sp.netkeiba.com/race/shutuba.html?race_id={race_id}"
+            host = "nar.sp.netkeiba.com" if nar else "race.sp.netkeiba.com"
+            url = f"https://{host}/race/shutuba.html?race_id={race_id}"
             r = self._request("GET", url)
             html = r.text
             logger.info("出馬表取得 race_id=%s status=%s len=%d",
@@ -385,6 +387,31 @@ class NetkeibaClient:
         logger.info("馬メモ horse_id=%s notes=%d pages=%d",
                     horse_id, len(notes), len(fragments))
         return notes, warnings
+
+    def get_horse_db_results(self, horse_id: str) -> list[HorseRaceNote]:
+        """出走馬DBページの戦績表（NAR Myロジック用・要ログイン=馬場指数）。
+
+        全成績ページ（/horse/result/）を優先し、取れなければ
+        馬ページ本体（直近走のみ掲載）へフォールバック。
+        """
+        key = f"dbresult:{horse_id}"
+        html = None if self.force_refresh else self.repo.cache_get(
+            key, TTL_NOTES)
+        if html is None:
+            urls = [f"https://db.sp.netkeiba.com/horse/result/{horse_id}/",
+                    f"https://db.sp.netkeiba.com/horse/{horse_id}/"]
+            for url in urls:
+                r = self._request("GET", url)
+                if r.status_code == 200 and parse_horse_db_results(r.text):
+                    html = r.text
+                    break
+            if html is None:
+                logger.info("戦績表なし horse_id=%s", horse_id)
+                return []
+            self.repo.cache_set(key, html)
+        notes = parse_horse_db_results(html)
+        logger.info("戦績表 horse_id=%s runs=%d", horse_id, len(notes))
+        return notes
 
     def get_race_result(self, race_id: str) -> list[ResultRow] | None:
         """公式レース結果（db.netkeiba.com・ログイン不要・不変キャッシュ）。"""
