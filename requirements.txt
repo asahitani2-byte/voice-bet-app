@@ -1,3 +1,4 @@
+# Python 3.10+ 推奨（開発は 3.14 で確認）
 streamlit>=1.32.0
 requests
 beautifulsoup4
@@ -5,3 +6,9 @@ SpeechRecognition
 streamlit-mic-recorder
 imageio-ffmpeg
 playwright==1.60.0
+anthropic
+pandas
+
+# 開発・テスト用
+pytest
+

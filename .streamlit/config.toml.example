@@ -1,0 +1,16 @@
+# Streamlit 設定サンプル
+# 使用する場合は config.toml にコピーしてください
+#   cp .streamlit/config.toml.example .streamlit/config.toml
+
+[server]
+# 外部公開時は headless を true に
+headless = true
+port = 8501
+# アップロードを使わないため制限
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"

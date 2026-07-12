@@ -1,6 +1,28 @@
 __pycache__/
 *.pyc
-.env
-.streamlit/secrets.toml
-*.log
 .DS_Store
+
+# ─── 認証情報・秘密情報（絶対にコミットしない）───
+.env
+.env.local
+.env.*.local
+.streamlit/secrets.toml
+nk_cookies.json
+.winvoice/
+
+# ─── データベース・キャッシュ・ログ ───
+*.db
+*.sqlite3
+data/
+logs/
+*.log
+
+# ─── バックアップ・一時ファイル ───
+voice_bet_app_backup_*.py
+*.corrupt.*
+
+# ─── テスト成果物 ───
+.pytest_cache/
+
+# ─── 個人ファイル（PPTX等はリポジトリ対象外）───
+*.pptx
