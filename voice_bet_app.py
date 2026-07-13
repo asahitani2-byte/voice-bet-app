@@ -395,6 +395,158 @@ def bet_label(bet: dict) -> str:
     suffix = "（BOX）" if bet["box"] else "（ながし）" if bet["formation"] else ""
     return f"{bet['type_name']}{suffix}  {horses}  {bet['amount']:,}円"
 
+
+@st.cache_data(show_spinner=False)
+def _michiko_video_b64() -> str:
+    """馬券お渡し演出動画（michiko_handover.mp4）をbase64で返す。"""
+    import base64
+    import pathlib
+    p = pathlib.Path(__file__).parent / "michiko_handover.mp4"
+    if not p.exists():
+        return ""
+    try:
+        return base64.b64encode(p.read_bytes()).decode()
+    except OSError:
+        return ""
+
+
+@st.cache_data(show_spinner=False)
+def _michiko_b64() -> str:
+    """演出用にキービジュアルを縮小してbase64化（初回のみ生成）。"""
+    import base64
+    import io
+    import pathlib
+    p = pathlib.Path(__file__).parent / "keymage.png"
+    if not p.exists():
+        return ""
+    try:
+        from PIL import Image
+        img = Image.open(p).convert("RGB")
+        w = 760
+        img = img.resize((w, int(img.height * w / img.width)))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=82)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return base64.b64encode(p.read_bytes()).decode()
+
+
+def show_ticket_handover_overlay():
+    """買い目転送中の全画面演出（約10秒）。
+
+    みちこ本人（キービジュアル）が写った窓口から、実際の買い目が
+    印字された馬券がこちらへ差し出されるアニメーション。CSSのみで
+    動作し、10秒後に自動フェードアウト（pointer-events:noneのため
+    操作は妨げない）。
+    """
+    import html as _html
+    bets = st.session_state.bets
+    race = _html.escape(st.session_state.race_label or "")
+    rows = "".join(
+        f'<div class="mchk-row">{_html.escape(bet_label(b))}</div>'
+        for b in bets[:6])
+    if len(bets) > 6:
+        rows += f'<div class="mchk-row">ほか {len(bets) - 6} 件</div>'
+    total = sum(b.get("amount", 0) for b in bets)
+    video = _michiko_video_b64()
+    if video:
+        # 動画演出: 5秒再生後は最終フレームで静止（loopなし）→10秒でフェード
+        st.markdown(f"""<style>
+.mchk-overlay {{ position: fixed; inset: 0; z-index: 999990;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center, rgba(18,44,32,.93), rgba(0,0,0,.97));
+  pointer-events: none; animation: mchkOverlay 10s ease forwards; }}
+@keyframes mchkOverlay {{ 0% {{opacity:0}} 4% {{opacity:1}} 90% {{opacity:1}}
+  100% {{opacity:0; visibility:hidden}} }}
+.mchk-video {{ width: min(96vw, 860px); max-height: 76vh; border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.65);
+  animation: mchkVideoIn .7s ease-out both; }}
+@keyframes mchkVideoIn {{ from {{opacity:0; transform: scale(.96)}}
+  to {{opacity:1; transform: scale(1)}} }}
+.mchk-msg {{ position: fixed; bottom: 4vh; left: 0; right: 0; text-align: center;
+  color: #f3e9c9; font-weight: 700; letter-spacing: .12em;
+  animation: mchkMsg 1.2s ease-in-out infinite alternate; }}
+@keyframes mchkMsg {{ from {{opacity:.5}} to {{opacity:1}} }}
+</style>
+<div class="mchk-overlay">
+  <video class="mchk-video" autoplay muted playsinline
+         src="data:video/mp4;base64,{video}"></video>
+  <div class="mchk-msg">みちこが馬券をお渡ししています…</div>
+</div>""", unsafe_allow_html=True)
+        return
+
+    # フォールバック（動画なし環境）: 従来のCSS演出
+    kv = _michiko_b64()
+    michiko_img = (f'<img class="mchk-michiko" '
+                   f'src="data:image/jpeg;base64,{kv}">' if kv else
+                   '<div class="mchk-window">🏇 WINS みちこ　投票券発売窓口</div>')
+    st.markdown(f"""<style>
+.mchk-overlay {{ position: fixed; inset: 0; z-index: 999990;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  background: radial-gradient(ellipse at center, rgba(18,44,32,.93), rgba(0,0,0,.97));
+  pointer-events: none; animation: mchkOverlay 10s ease forwards; }}
+@keyframes mchkOverlay {{ 0% {{opacity:0}} 4% {{opacity:1}} 90% {{opacity:1}}
+  100% {{opacity:0; visibility:hidden}} }}
+/* みちこ本人（窓口）: ふっと現れ、馬券を差し出す瞬間に少し前へ */
+.mchk-michiko {{ margin-top: 5vh; width: min(92vw, 620px); border-radius: 12px;
+  box-shadow: 0 18px 60px rgba(0,0,0,.6);
+  animation: mchkMichiko 10s ease forwards; }}
+@keyframes mchkMichiko {{
+  0%   {{opacity:0; transform: scale(.96) translateY(10px)}}
+  8%   {{opacity:1; transform: scale(1)   translateY(0)}}
+  16%  {{transform: scale(1)    translateY(0)}}
+  26%  {{transform: scale(1.03) translateY(6px)}}   /* 差し出す動き */
+  40%  {{transform: scale(1)    translateY(0)}}
+  100% {{transform: scale(1)    translateY(0)}} }}
+.mchk-window {{ margin-top: 7vh; background: #0e6b45; color: #fff;
+  font-weight: 800; padding: 10px 26px; border-radius: 8px; letter-spacing: .18em;
+  box-shadow: 0 4px 18px rgba(0,0,0,.5); }}
+/* 馬券: みちこの手元（画像の下端中央）から、こちらへ差し出される */
+.mchk-ticket {{ width: min(80vw, 430px); background: linear-gradient(#fffdf5, #f2edda);
+  border-radius: 10px; padding: 0 0 14px; overflow: hidden; position: relative;
+  box-shadow: 0 30px 80px rgba(0,0,0,.65); transform-origin: center top;
+  margin-top: -9vh;  /* 画像の手元に重なる位置から出発 */
+  animation: mchkHand 10s cubic-bezier(.22,.8,.3,1) forwards; }}
+@keyframes mchkHand {{
+  0%   {{opacity:0; transform: translateY(-9vh) scale(.06) rotate(-3deg)}}
+  16%  {{opacity:0; transform: translateY(-9vh) scale(.06) rotate(-3deg)}}
+  24%  {{opacity:1; transform: translateY(-7vh) scale(.14) rotate(-4deg)}}
+  60%  {{transform: translateY(6vh)  scale(.92) rotate(2deg)}}
+  74%  {{transform: translateY(9vh)  scale(1)   rotate(-.6deg)}}
+  81%  {{transform: translateY(9vh)  scale(1.01) rotate(.4deg)}}
+  100% {{transform: translateY(9vh)  scale(1)   rotate(0)}} }}
+.mchk-ticket::after {{ content: ""; position: absolute; inset: 0;
+  background: linear-gradient(115deg, transparent 32%, rgba(255,255,255,.7) 50%, transparent 68%);
+  transform: translateX(-130%); animation: mchkShine 10s ease forwards; }}
+@keyframes mchkShine {{ 0%,76% {{transform:translateX(-130%)}}
+  88%,100% {{transform:translateX(130%)}} }}
+.mchk-head {{ background: #0e6b45; color: #fff; text-align: center; font-weight: 800;
+  padding: 9px; letter-spacing: .35em; }}
+.mchk-race {{ text-align: center; font-weight: 700; color: #333;
+  padding: 8px 12px 4px; font-size: .95rem; }}
+.mchk-row {{ font-family: ui-monospace, SFMono-Regular, monospace; color: #111;
+  padding: 4px 18px; font-size: .92rem; border-bottom: 1px dashed #cbbf9e; }}
+.mchk-total {{ text-align: right; padding: 7px 18px 0; font-weight: 800; color: #0e6b45; }}
+.mchk-barcode {{ height: 32px; margin: 10px 18px 0;
+  background: repeating-linear-gradient(90deg, #222 0 2px, transparent 2px 5px,
+    #222 5px 6px, transparent 6px 10px); }}
+.mchk-msg {{ position: fixed; bottom: 4vh; left: 0; right: 0; text-align: center;
+  color: #f3e9c9; font-weight: 700; letter-spacing: .12em;
+  animation: mchkMsg 1.2s ease-in-out infinite alternate; }}
+@keyframes mchkMsg {{ from {{opacity:.5}} to {{opacity:1}} }}
+</style>
+<div class="mchk-overlay">
+  {michiko_img}
+  <div class="mchk-ticket">
+    <div class="mchk-head">勝馬投票券</div>
+    <div class="mchk-race">{race}</div>
+    {rows}
+    <div class="mchk-total">合計 {total:,}円</div>
+    <div class="mchk-barcode"></div>
+  </div>
+  <div class="mchk-msg">みちこが馬券をお渡ししています…</div>
+</div>""", unsafe_allow_html=True)
+
 # ─── 馬名指定の買い目（中央のみ）────────────────────────────
 def _kana_norm(s: str) -> str:
     """ひらがな→カタカナ変換＋空白/記号除去（馬名照合用）"""
@@ -978,7 +1130,15 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list,
                        f"&type={cfg['type_code']}{housiki_param}&race_id={race_id}")
                 page.goto(url, timeout=30000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
-                page.wait_for_timeout(1500)
+                # 固定1500ms待ちの代わりに「チェックボックスが現れたら即進む」
+                # （通常300〜600msで揃う。揃わない場合のみ上限まで待つ）
+                _sel = ("input[name='frm1[]']" if cfg["frm"].startswith("multi")
+                        else "input[value*='_b1_c0_'], input[value*='_b2_c0_']")
+                try:
+                    page.wait_for_selector(_sel, timeout=6000)
+                    page.wait_for_timeout(150)  # 描画安定の最小マージン
+                except PwTimeout:
+                    page.wait_for_timeout(1000)  # 従来相当のフォールバック
                 log_lines.append(f"  ページ: {page.url}")
 
                 # 馬番チェック
@@ -1031,14 +1191,22 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list,
                 }""")
                 log_lines.append(f"  ボタン: {click_result}")
 
-                page.wait_for_load_state("networkidle", timeout=8000)
-                page.wait_for_timeout(800)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except PwTimeout:
+                    pass  # 広告等でnetworkidleにならなくても続行
+                page.wait_for_timeout(400)
                 log_lines.append(f"  遷移後: {page.url}")
 
             # ?pid=bet ページへ（金額入力）
             page.goto(bet_url, timeout=20000)
             page.wait_for_load_state("domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
+            # 金額欄が現れたら即進む（従来は固定2000ms）
+            try:
+                page.wait_for_selector("input.InputMoney", timeout=8000)
+                page.wait_for_timeout(200)
+            except PwTimeout:
+                page.wait_for_timeout(1000)
             log_lines.append(f"\n金額入力ページ: {page.url}")
 
             # 金額フィールドを探して入力（100円単位）
@@ -1081,7 +1249,12 @@ def input_bets_to_netkeiba(base_race_url: str, bets: list,
                     sp = context.new_page()
                     sp.goto(shutuba_url, timeout=30000)
                     sp.wait_for_load_state("domcontentloaded", timeout=15000)
-                    sp.wait_for_timeout(2000)
+                    # 印セレクタが現れたら即進む（従来は固定2000ms）
+                    try:
+                        sp.wait_for_selector(".tzSelect", timeout=6000)
+                        sp.wait_for_timeout(200)
+                    except PwTimeout:
+                        sp.wait_for_timeout(1200)
                     mark_log = _fill_shutuba_marks(sp, shutuba_info["horse_marks"])
                     log_lines.extend(["", "📋 出馬表への印入力:"] + mark_log)
                     result["log"] = "\n".join(log_lines)
@@ -1496,8 +1669,21 @@ def buy_and_fetch_yoso(race_id: str, is_nar: bool) -> dict | None:
 # キービジュアルをページ最上部にフル幅で表示
 st.markdown("""<style>
 .block-container { padding-top: 0 !important; }
-[data-testid="stImage"] { margin: 0 !important; }
-[data-testid="stImage"] img { display: block; width: 100%; }
+[data-testid="stImage"] { margin: 0 !important; overflow: hidden; }
+[data-testid="stImage"] img {
+  display: block; width: 100%;
+  /* キービジュアル: 表示時フェードイン → ゆっくり呼吸するズーム */
+  animation: kvFadeIn 0.9s ease-out both,
+             kvBreath 7s ease-in-out 1.2s infinite alternate;
+}
+@keyframes kvFadeIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes kvBreath {
+  from { transform: scale(1); }
+  to   { transform: scale(1.02); }
+}
 header[data-testid="stHeader"] { display: none; }
 
 /* ── マイクリップル ── */
@@ -2433,6 +2619,7 @@ if st.session_state.bets:
         st.markdown('<div class="wv-transfer-btn">', unsafe_allow_html=True)
         if is_local:
             if st.button("🏇 楽天競馬に自動入力", type="primary", use_container_width=True):
+                show_ticket_handover_overlay()
                 with st.spinner("ブラウザを起動して買い目を入力中..."):
                     _venue = st.session_state.race_label.split()[0] if st.session_state.race_label else ""
                     log, _st_time = input_bets_to_rakuten(
@@ -2508,6 +2695,7 @@ if st.session_state.bets:
             else:
                 st.caption("※ IPATセッション未連携のため、iPhone側で買い目を確認できません")
             if st.button("🏇 netkeiba に自動入力", type="primary", use_container_width=True):
+                show_ticket_handover_overlay()
                 with st.spinner("ブラウザを起動して買い目を入力中..."):
                     log, _ = input_bets_to_netkeiba(
                         st.session_state.race_url,
